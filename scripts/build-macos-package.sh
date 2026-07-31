@@ -72,11 +72,20 @@ if [[ ! -f "$library" ]]; then
 fi
 
 cmake -E remove_directory "$build_root/package"
-mkdir -p "$stage/lib" "$stage/include/nuvio_engine" "$stage/licenses"
+mkdir -p "$stage/lib" "$stage/include/nuvio_engine" "$stage/jvm" "$stage/licenses"
 cp "$library" "$stage/lib/libnuvio_engine.dylib"
 strip -x "$stage/lib/libnuvio_engine.dylib"
 install_name_tool -id @rpath/libnuvio_engine.dylib "$stage/lib/libnuvio_engine.dylib"
 codesign --force --sign - --timestamp=none "$stage/lib/libnuvio_engine.dylib"
+"$engine_root/platform/jvm/gradlew" \
+    clean test jar generatePomFileForJvmPublication \
+    -Pnuvio.engine.testLibrary="$stage/lib/libnuvio_engine.dylib"
+cp \
+    "$engine_root/platform/jvm/build/libs/nuvio-engine-jvm-$engine_version.jar" \
+    "$stage/jvm/"
+cp \
+    "$engine_root/platform/jvm/build/publications/jvm/pom-default.xml" \
+    "$stage/jvm/nuvio-engine-jvm-$engine_version.pom"
 cp "$engine_root/include/nuvio_engine/nuvio_engine.h" "$stage/include/nuvio_engine/"
 cp "$engine_root/include/nuvio_engine/export.h" "$stage/include/nuvio_engine/"
 cp "$engine_root/LICENSE" "$stage/licenses/NUVIO-ENGINE-LICENSE.txt"
@@ -97,6 +106,10 @@ Minimum OS: macOS 11.0
 Libtorrent: 2.0.12 commit 740a0b9aeabe00e762cc0efe4a0f27593db2550b
 Boost: 1.86.0 sha256 1bed88e40401b2cb7a1f76d4bab499e352fa4d0c5f31c0dbae64e24d34d7513b
 OpenSSL: 3.5.7 sha256 a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
+JVM binding: $engine_version, Java 11 bytecode
+Kotlin: 2.3.0
+Kotlin Coroutines: 1.8.1
+JNA: 5.19.1
 AppleClang: $compiler_version
 CMake: $cmake_version
 EOF
