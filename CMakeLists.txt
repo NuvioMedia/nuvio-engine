@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     nuvio_engine
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "Cross-platform peer-to-peer streaming engine for Nuvio"
     LANGUAGES C CXX
 )

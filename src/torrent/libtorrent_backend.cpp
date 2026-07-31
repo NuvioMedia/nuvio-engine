@@ -98,7 +98,7 @@ int bounded_rate(const std::uint64_t value) {
 lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     lt::settings_pack settings;
     const auto profile = torrent_profile_settings(config.torrent_profile);
-    settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.0");
+    settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.1");
     settings.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:0,[::]:0");
     settings.set_bool(lt::settings_pack::enable_dht, true);
     settings.set_bool(lt::settings_pack::enable_lsd, true);
@@ -365,9 +365,13 @@ public:
         if (context != nullptr) {
             context->explicitly_removed = true;
         }
+        pending_cache_unloads_.erase(id);
+        const auto cache_removal_pending = pending_cache_removals_.erase(id) > 0;
         pending_removals_.emplace(id, request_id);
         try {
-            session_.remove_torrent(torrent->second);
+            if (!cache_removal_pending) {
+                session_.remove_torrent(torrent->second);
+            }
         } catch (...) {
             pending_removals_.erase(id);
             if (context != nullptr) {
@@ -902,6 +906,56 @@ private:
         }
     }
 
+    void begin_cache_unload(
+        const std::string& id,
+        const lt::torrent_handle& handle,
+        std::vector<BackendEvent>& events
+    ) {
+        if (pending_cache_unloads_.erase(id) == 0 || !handle.is_valid()) {
+            return;
+        }
+        pending_cache_removals_.insert(id);
+        try {
+            session_.remove_torrent(handle);
+        } catch (const std::exception& error) {
+            pending_cache_removals_.erase(id);
+            report_disk_cache_error(
+                std::string("failed to unload inactive torrent: ") + error.what(),
+                events
+            );
+        }
+    }
+
+    bool request_cache_unloads(
+        std::vector<BackendEvent>& events,
+        const bool include_warm
+    ) {
+        for (const auto& [id, warm_since] : warm_since_) {
+            static_cast<void>(warm_since);
+            if ((!include_warm && !quiesced_torrents_.contains(id)) ||
+                pending_removals_.contains(id) ||
+                pending_cache_unloads_.contains(id) ||
+                pending_cache_removals_.contains(id) ||
+                stream_bridge_->has_stream_for_torrent(id)) {
+                continue;
+            }
+            const auto torrent = handles_.find(id);
+            if (torrent == handles_.end() || !torrent->second.is_valid()) {
+                continue;
+            }
+            pending_cache_unloads_.insert(id);
+            auto* context = torrent->second.userdata().get<RequestContext>();
+            request_resume_save(
+                torrent->second,
+                lt::torrent_handle::save_info_dict
+            );
+            if (context == nullptr || !pending_resume_saves_.contains(context)) {
+                begin_cache_unload(id, torrent->second, events);
+            }
+        }
+        return !pending_cache_unloads_.empty() || !pending_cache_removals_.empty();
+    }
+
     void handle_resume_saved(
         const lt::save_resume_data_alert& alert,
         std::vector<BackendEvent>& events
@@ -932,6 +986,9 @@ private:
                 {},
             });
         }
+        if (pending_cache_unloads_.contains(id)) {
+            begin_cache_unload(id, alert.handle, events);
+        }
     }
 
     void handle_resume_save_failed(
@@ -940,14 +997,23 @@ private:
     ) {
         auto* context = alert.handle.userdata().get<RequestContext>();
         pending_resume_saves_.erase(context);
-        if (alert.error == lt::errors::resume_data_not_modified ||
-            (context != nullptr && context->explicitly_removed)) {
+        if (context != nullptr && context->explicitly_removed) {
+            return;
+        }
+        const auto id = context == nullptr || context->torrent_id.empty()
+            ? torrent_id(alert.handle)
+            : context->torrent_id;
+        if (pending_cache_unloads_.contains(id)) {
+            begin_cache_unload(id, alert.handle, events);
+            return;
+        }
+        if (alert.error == lt::errors::resume_data_not_modified) {
             return;
         }
         events.push_back({
             BackendEventType::torrent_error,
             0,
-            context == nullptr ? torrent_id(alert.handle) : context->torrent_id,
+            id,
             std::string("failed to create torrent state: ") + alert.error.message(),
             {},
         });
@@ -1033,8 +1099,9 @@ private:
         std::unordered_set<std::string> protected_ids;
         protected_ids.reserve(handles_.size() + pending_.size());
         for (const auto& [id, handle] : handles_) {
-            static_cast<void>(handle);
-            protected_ids.insert(id);
+            if (handle.is_valid()) {
+                protected_ids.insert(id);
+            }
         }
         for (const auto& [context, request] : pending_) {
             static_cast<void>(context);
@@ -1066,16 +1133,9 @@ private:
         try {
             const auto stats = disk_cache_.enforce(protected_torrents());
             last_disk_cache_error_.clear();
-            if (stats.over_budget && !disk_over_budget_reported_) {
-                events.push_back({
-                    BackendEventType::torrent_error,
-                    0,
-                    {},
-                    "disk cache budget is exceeded by protected torrent data",
-                    {},
-                });
+            if (stats.over_budget) {
+                request_cache_unloads(events, false);
             }
-            disk_over_budget_reported_ = stats.over_budget;
         } catch (const std::exception& error) {
             report_disk_cache_error(error.what(), events);
         }
@@ -1087,6 +1147,9 @@ private:
         }
         const auto stream = stream_bridge_->statistics();
         if (stream.active_http_requests > 0 || stream.active_demands > 0) {
+            return;
+        }
+        if (request_cache_unloads(events, true)) {
             return;
         }
         auto requests = std::move(pending_disk_reclaims_);
@@ -1103,7 +1166,6 @@ private:
                 target_bytes
             );
             last_disk_cache_error_.clear();
-            disk_over_budget_reported_ = stats.over_budget;
             for (const auto& request : requests) {
                 const auto effective_target = std::min(
                     request.target_bytes,
@@ -1150,6 +1212,7 @@ private:
     }
 
     void activate_torrent(const std::string& id, const lt::torrent_handle& handle) {
+        pending_cache_unloads_.erase(id);
         handle.set_flags(lt::torrent_flags::upload_mode);
         handle.set_flags(
             lt::torrent_flags_t{},
@@ -1593,6 +1656,8 @@ private:
             : context->torrent_id;
         const auto pending = pending_removals_.find(id);
         const auto request_id = pending == pending_removals_.end() ? 0 : pending->second;
+        const auto cache_removal = pending_cache_removals_.erase(id) > 0;
+        pending_cache_unloads_.erase(id);
         events.push_back({BackendEventType::torrent_removed, request_id, id, {}, {}});
         if (pending != pending_removals_.end()) {
             pending_removals_.erase(pending);
@@ -1604,16 +1669,18 @@ private:
         stream_bridge_->remove_torrent(id);
         pending_prepares_.erase(id);
         pending_resume_saves_.erase(context);
-        try {
-            storage::remove_file_if_present(resume_path(id));
-        } catch (const std::exception& error) {
-            events.push_back({
-                BackendEventType::torrent_error,
-                request_id,
-                id,
-                std::string("failed to remove persisted torrent state: ") + error.what(),
-                {},
-            });
+        if (!cache_removal) {
+            try {
+                storage::remove_file_if_present(resume_path(id));
+            } catch (const std::exception& error) {
+                events.push_back({
+                    BackendEventType::torrent_error,
+                    request_id,
+                    id,
+                    std::string("failed to remove persisted torrent state: ") + error.what(),
+                    {},
+                });
+            }
         }
         const auto active = active_.find(id);
         if (active != active_.end()) {
@@ -1645,6 +1712,8 @@ private:
     std::unordered_map<std::string, PendingPrepare> pending_prepares_;
     std::unordered_map<std::string, std::uint64_t> pending_removals_;
     std::unordered_set<RequestContext*> pending_resume_saves_;
+    std::unordered_set<std::string> pending_cache_unloads_;
+    std::unordered_set<std::string> pending_cache_removals_;
     std::vector<std::unique_ptr<RequestContext>> retired_;
     std::vector<BackendEvent> queued_events_;
     std::chrono::steady_clock::time_point last_resume_checkpoint_ =
@@ -1656,7 +1725,6 @@ private:
     std::chrono::steady_clock::time_point next_warm_check_{};
     std::chrono::steady_clock::time_point next_disk_cache_check_{};
     std::string last_disk_cache_error_;
-    bool disk_over_budget_reported_ = false;
     bool shutting_down_ = false;
     lt::session session_;
     std::unique_ptr<LibtorrentStreamBridge> stream_bridge_;

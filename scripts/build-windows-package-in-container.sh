@@ -96,7 +96,7 @@ cp "$engine_root/.local-artifacts/documentation/README.md" "$stage/README.md"
 
 compiler_version=$("/opt/llvm-mingw/bin/${target_triple}-clang" --version | awk 'NR == 1 { print $4 }')
 cat > "$stage/BUILD-INFO.txt" <<EOF
-Nuvio Engine: 0.1.0
+Nuvio Engine: 0.1.1
 Target: Windows $target_architecture
 Minimum OS: Windows 10
 Runtime: UCRT

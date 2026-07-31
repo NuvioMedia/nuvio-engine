@@ -23,7 +23,7 @@ temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
 tar -xzf "$archive" -C "$temporary"
 package="$temporary/nuvio-engine-linux-$target_architecture"
-library="$package/lib/libnuvio_engine.so.0.1.0"
+library="$package/lib/libnuvio_engine.so.0.1.1"
 fail() {
     echo "Linux package verification failed: $*" >&2
     exit 1
@@ -32,7 +32,7 @@ fail() {
 [[ -f "$library" ]] || fail "shared library is missing"
 [[ "$(readlink "$package/lib/libnuvio_engine.so")" == libnuvio_engine.so.0 ]] || \
     fail "unversioned library symlink is wrong"
-[[ "$(readlink "$package/lib/libnuvio_engine.so.0")" == libnuvio_engine.so.0.1.0 ]] || \
+[[ "$(readlink "$package/lib/libnuvio_engine.so.0")" == libnuvio_engine.so.0.1.1 ]] || \
     fail "SONAME library symlink is wrong"
 cmp -s \
     "$package/include/nuvio_engine/nuvio_engine.h" \

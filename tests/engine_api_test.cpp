@@ -174,7 +174,7 @@ private:
 
 NUVIO_TEST("C API reports its version") {
     NUVIO_EXPECT_EQ(nuvio_engine_api_version(), NUVIO_ENGINE_API_VERSION);
-    NUVIO_EXPECT_EQ(std::string(nuvio_engine_version_string()), std::string("0.1.0"));
+    NUVIO_EXPECT_EQ(std::string(nuvio_engine_version_string()), std::string("0.1.1"));
 }
 
 NUVIO_TEST("C API reports protocol backend availability") {

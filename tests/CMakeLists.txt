@@ -13,6 +13,7 @@ add_executable(
     ${PROJECT_SOURCE_DIR}/src/cache/verified_piece_cache.cpp
     disk_cache_manager_test.cpp
     ${PROJECT_SOURCE_DIR}/src/cache/disk_cache_manager.cpp
+    disk_cache_policy_integration_test.cpp
     engine_api_test.cpp
     file_selection_test.cpp
     ${PROJECT_SOURCE_DIR}/src/torrent/file_selection.cpp

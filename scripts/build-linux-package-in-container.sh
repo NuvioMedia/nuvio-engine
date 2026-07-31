@@ -61,9 +61,9 @@ ctest --test-dir "$build_root" --output-on-failure
 
 cmake -E remove_directory "$build_root/package"
 mkdir -p "$stage/lib" "$stage/include/nuvio_engine" "$stage/licenses"
-cp "$build_root/libnuvio_engine.so.0.1.0" "$stage/lib/libnuvio_engine.so.0.1.0"
-strip --strip-unneeded "$stage/lib/libnuvio_engine.so.0.1.0"
-ln -s libnuvio_engine.so.0.1.0 "$stage/lib/libnuvio_engine.so.0"
+cp "$build_root/libnuvio_engine.so.0.1.1" "$stage/lib/libnuvio_engine.so.0.1.1"
+strip --strip-unneeded "$stage/lib/libnuvio_engine.so.0.1.1"
+ln -s libnuvio_engine.so.0.1.1 "$stage/lib/libnuvio_engine.so.0"
 ln -s libnuvio_engine.so.0 "$stage/lib/libnuvio_engine.so"
 cp "$engine_root/include/nuvio_engine/nuvio_engine.h" "$stage/include/nuvio_engine/"
 cp "$engine_root/include/nuvio_engine/export.h" "$stage/include/nuvio_engine/"
@@ -77,7 +77,7 @@ cp "$dependency_root/sources/openssl-3.5.7/LICENSE.txt" "$stage/licenses/OPENSSL
 cp "$engine_root/.local-artifacts/documentation/README.md" "$stage/README.md"
 
 cat > "$stage/BUILD-INFO.txt" <<EOF
-Nuvio Engine: 0.1.0
+Nuvio Engine: 0.1.1
 Target: Linux $target_architecture
 Minimum glibc: 2.35
 Libtorrent: 2.0.12 commit 740a0b9aeabe00e762cc0efe4a0f27593db2550b
