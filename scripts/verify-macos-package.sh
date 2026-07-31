@@ -71,6 +71,7 @@ fi
 
 cmp -s "$package/include/nuvio_engine/nuvio_engine.h" "$engine_root/include/nuvio_engine/nuvio_engine.h" || fail "C header mismatch"
 cmp -s "$package/include/nuvio_engine/export.h" "$engine_root/include/nuvio_engine/export.h" || fail "export header mismatch"
+cmp -s "$package/README.md" "$engine_root/README.md" || fail "README mismatch"
 jar_entries=$(jar tf "$jvm_jar")
 for entry in \
     com/nuvio/engine/NuvioEngine.class \

@@ -72,7 +72,11 @@ if [[ ! -f "$library" ]]; then
 fi
 
 cmake -E remove_directory "$build_root/package"
-mkdir -p "$stage/lib" "$stage/include/nuvio_engine" "$stage/jvm" "$stage/licenses"
+mkdir -p \
+    "$stage/lib" \
+    "$stage/include/nuvio_engine" \
+    "$stage/jvm" \
+    "$stage/licenses"
 cp "$library" "$stage/lib/libnuvio_engine.dylib"
 strip -x "$stage/lib/libnuvio_engine.dylib"
 install_name_tool -id @rpath/libnuvio_engine.dylib "$stage/lib/libnuvio_engine.dylib"

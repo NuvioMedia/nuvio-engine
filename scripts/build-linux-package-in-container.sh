@@ -59,12 +59,24 @@ if ! cmake --build "$build_root" --parallel "$jobs" >"$build_log" 2>&1; then
 fi
 ctest --test-dir "$build_root" --output-on-failure
 
+engine_version=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' "$build_root/CMakeCache.txt")
+if [[ ! "$engine_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "could not resolve the configured engine version" >&2
+    exit 1
+fi
+engine_soversion=${engine_version%%.*}
+library_name="libnuvio_engine.so.$engine_version"
+if [[ ! -f "$build_root/$library_name" ]]; then
+    echo "built shared library is missing: $build_root/$library_name" >&2
+    exit 1
+fi
+
 cmake -E remove_directory "$build_root/package"
 mkdir -p "$stage/lib" "$stage/include/nuvio_engine" "$stage/licenses"
-cp "$build_root/libnuvio_engine.so.0.1.1" "$stage/lib/libnuvio_engine.so.0.1.1"
-strip --strip-unneeded "$stage/lib/libnuvio_engine.so.0.1.1"
-ln -s libnuvio_engine.so.0.1.1 "$stage/lib/libnuvio_engine.so.0"
-ln -s libnuvio_engine.so.0 "$stage/lib/libnuvio_engine.so"
+cp "$build_root/$library_name" "$stage/lib/$library_name"
+strip --strip-unneeded "$stage/lib/$library_name"
+ln -s "$library_name" "$stage/lib/libnuvio_engine.so.$engine_soversion"
+ln -s "libnuvio_engine.so.$engine_soversion" "$stage/lib/libnuvio_engine.so"
 cp "$engine_root/include/nuvio_engine/nuvio_engine.h" "$stage/include/nuvio_engine/"
 cp "$engine_root/include/nuvio_engine/export.h" "$stage/include/nuvio_engine/"
 cp "$engine_root/LICENSE" "$stage/licenses/NUVIO-ENGINE-LICENSE.txt"
@@ -74,10 +86,10 @@ cp "$libtorrent_source/COPYING" "$stage/licenses/LIBTORRENT-COPYING.txt"
 cp "$libtorrent_source/deps/try_signal/LICENSE" "$stage/licenses/TRY_SIGNAL-LICENSE.txt"
 cp "$boost_source/LICENSE_1_0.txt" "$stage/licenses/BOOST-LICENSE_1_0.txt"
 cp "$dependency_root/sources/openssl-3.5.7/LICENSE.txt" "$stage/licenses/OPENSSL-LICENSE.txt"
-cp "$engine_root/.local-artifacts/documentation/README.md" "$stage/README.md"
+cp "$engine_root/README.md" "$stage/README.md"
 
 cat > "$stage/BUILD-INFO.txt" <<EOF
-Nuvio Engine: 0.1.1
+Nuvio Engine: $engine_version
 Target: Linux $target_architecture
 Minimum glibc: 2.35
 Libtorrent: 2.0.12 commit 740a0b9aeabe00e762cc0efe4a0f27593db2550b

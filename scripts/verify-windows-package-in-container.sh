@@ -33,6 +33,9 @@ fail() {
 }
 
 [[ -f "$library" ]] || fail "DLL is missing"
+[[ -f "$package/BUILD-INFO.txt" ]] || fail "build metadata is missing"
+engine_version=$(sed -n 's/^Nuvio Engine: //p' "$package/BUILD-INFO.txt")
+[[ "$engine_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid engine version metadata"
 [[ -f "$package/lib/libnuvio_engine.dll.a" ]] || fail "import library is missing"
 cmp -s \
     "$package/lib/nuvio_engine.def" \
@@ -44,6 +47,7 @@ cmp -s \
 cmp -s \
     "$package/include/nuvio_engine/export.h" \
     "$engine_root/include/nuvio_engine/export.h" || fail "export header mismatch"
+cmp -s "$package/README.md" "$engine_root/README.md" || fail "README mismatch"
 
 headers=$($readobj --file-headers "$library")
 grep -Fq "$expected_machine" <<< "$headers" || fail "wrong PE machine"

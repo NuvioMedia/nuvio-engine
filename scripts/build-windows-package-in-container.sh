@@ -71,6 +71,12 @@ if ! cmake --build "$build_root" --parallel "$jobs" >"$build_log" 2>&1; then
     exit 1
 fi
 
+engine_version=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' "$build_root/CMakeCache.txt")
+if [[ ! "$engine_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "could not resolve the configured engine version" >&2
+    exit 1
+fi
+
 cmake -E remove_directory "$build_root/package"
 mkdir -p \
     "$stage/bin" \
@@ -92,11 +98,11 @@ cp "$libtorrent_source/deps/try_signal/LICENSE" "$stage/licenses/TRY_SIGNAL-LICE
 cp "$boost_source/LICENSE_1_0.txt" "$stage/licenses/BOOST-LICENSE_1_0.txt"
 cp "$dependency_root/sources/openssl-3.5.7/LICENSE.txt" "$stage/licenses/OPENSSL-LICENSE.txt"
 cp /opt/llvm-mingw/LICENSE.TXT "$stage/licenses/LLVM-MINGW-LICENSE.txt"
-cp "$engine_root/.local-artifacts/documentation/README.md" "$stage/README.md"
+cp "$engine_root/README.md" "$stage/README.md"
 
 compiler_version=$("/opt/llvm-mingw/bin/${target_triple}-clang" --version | awk 'NR == 1 { print $4 }')
 cat > "$stage/BUILD-INFO.txt" <<EOF
-Nuvio Engine: 0.1.1
+Nuvio Engine: $engine_version
 Target: Windows $target_architecture
 Minimum OS: Windows 10
 Runtime: UCRT

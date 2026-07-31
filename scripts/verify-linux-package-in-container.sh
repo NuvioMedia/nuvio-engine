@@ -23,16 +23,21 @@ temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
 tar -xzf "$archive" -C "$temporary"
 package="$temporary/nuvio-engine-linux-$target_architecture"
-library="$package/lib/libnuvio_engine.so.0.1.1"
 fail() {
     echo "Linux package verification failed: $*" >&2
     exit 1
 }
 
+[[ -f "$package/BUILD-INFO.txt" ]] || fail "build metadata is missing"
+engine_version=$(sed -n 's/^Nuvio Engine: //p' "$package/BUILD-INFO.txt")
+[[ "$engine_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid engine version metadata"
+engine_soversion=${engine_version%%.*}
+library_name="libnuvio_engine.so.$engine_version"
+library="$package/lib/$library_name"
 [[ -f "$library" ]] || fail "shared library is missing"
-[[ "$(readlink "$package/lib/libnuvio_engine.so")" == libnuvio_engine.so.0 ]] || \
+[[ "$(readlink "$package/lib/libnuvio_engine.so")" == "libnuvio_engine.so.$engine_soversion" ]] || \
     fail "unversioned library symlink is wrong"
-[[ "$(readlink "$package/lib/libnuvio_engine.so.0")" == libnuvio_engine.so.0.1.1 ]] || \
+[[ "$(readlink "$package/lib/libnuvio_engine.so.$engine_soversion")" == "$library_name" ]] || \
     fail "SONAME library symlink is wrong"
 cmp -s \
     "$package/include/nuvio_engine/nuvio_engine.h" \
@@ -40,13 +45,16 @@ cmp -s \
 cmp -s \
     "$package/include/nuvio_engine/export.h" \
     "$engine_root/include/nuvio_engine/export.h" || fail "export header mismatch"
+cmp -s "$package/README.md" "$engine_root/README.md" || fail "README mismatch"
 case "$target_architecture" in
     x86_64) expected_machine='Advanced Micro Devices X86-64' ;;
     aarch64) expected_machine='AArch64' ;;
     *) fail "unsupported architecture" ;;
 esac
 readelf -h "$library" | grep -E "Machine:.*$expected_machine" >/dev/null || fail "wrong ELF machine"
-readelf -d "$library" | grep -E 'SONAME.*\[libnuvio_engine.so.0\]' >/dev/null || fail "wrong SONAME"
+readelf -d "$library" \
+    | grep -F "SONAME" \
+    | grep -F "[libnuvio_engine.so.$engine_soversion]" >/dev/null || fail "wrong SONAME"
 if readelf -d "$library" | grep -E 'RPATH|RUNPATH' >/dev/null; then
     fail "shared library contains an RPATH"
 fi
