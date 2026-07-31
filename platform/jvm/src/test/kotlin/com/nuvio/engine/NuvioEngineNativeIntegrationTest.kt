@@ -3,6 +3,7 @@ package com.nuvio.engine
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -11,8 +12,12 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class NuvioEngineNativeIntegrationTest {
@@ -123,6 +128,59 @@ class NuvioEngineNativeIntegrationTest {
             awaitStats(engine) { it.diskCacheUsedBytes == 0L }
             assertFalse(payload.exists())
         } finally {
+            engine.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun protectedDiskCachePressureRemainsNonfatalThroughJvmBinding() = runBlocking {
+        val libraryPath = System.getProperty("nuvio.engine.testLibrary").orEmpty()
+        assumeTrue(libraryPath.isNotBlank(), "nuvio.engine.testLibrary was not provided")
+        val library = File(libraryPath)
+        assumeTrue(library.isFile, "native test library does not exist")
+
+        val root = createTempDirectory("nuvio-engine-cache-pressure-").toFile()
+        val dataDirectory = File(root, "data")
+        val cacheDirectory = File(root, "cache")
+        val payload = File(cacheDirectory, "payload/$TORRENT_ID/test.bin")
+        payload.parentFile.mkdirs()
+        payload.writeBytes(CONTENT)
+        val engine = NuvioEngineRuntime.load(library).create(
+            NuvioEngineConfig(
+                dataDirectory = dataDirectory,
+                cacheDirectory = cacheDirectory,
+                memoryCacheCapacityBytes = 1024 * 1024,
+                diskCacheCapacityBytes = 3,
+                uploadMode = NuvioUploadMode.Disabled,
+                streamInactivityTimeoutMilliseconds = 0,
+            ),
+        )
+        val errors = CopyOnWriteArrayList<NuvioEvent>()
+        val collector = launch {
+            engine.events.collect { event ->
+                if (event.type == NuvioEventType.TorrentError) errors += event
+            }
+        }
+
+        try {
+            yield()
+            val torrentId = withTimeout(10_000) { engine.addTorrent(torrentData()) }
+            val stream = withTimeout(10_000) { engine.prepareStream(torrentId, fileIndex = 0) }
+            assertContentEquals(CONTENT, request(stream.url).body)
+
+            val stats = awaitStats(engine) {
+                it.diskCacheOverBudget &&
+                    it.diskCacheUsedBytes == CONTENT.size.toLong() &&
+                    it.diskCacheProtectedBytes == CONTENT.size.toLong()
+            }
+            assertEquals(3L, stats.diskCacheCapacityBytes)
+            delay(250)
+            assertTrue(errors.isEmpty(), "protected cache pressure emitted $errors")
+
+            withTimeout(10_000) { engine.stopStream(stream.id) }
+        } finally {
+            collector.cancelAndJoin()
             engine.close()
             root.deleteRecursively()
         }
