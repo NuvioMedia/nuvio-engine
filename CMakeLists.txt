@@ -105,6 +105,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NUVIO_ENGINE_BUILD_SHARED)
             "LINKER:-z,relro,-z,now"
     )
 endif()
+if(APPLE AND NUVIO_ENGINE_BUILD_SHARED)
+    set(NUVIO_ENGINE_APPLE_EXPORTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/nuvio-engine-apple.exports"
+    )
+    target_link_options(
+        nuvio_engine
+        PRIVATE
+            "LINKER:-exported_symbols_list,${NUVIO_ENGINE_APPLE_EXPORTS}"
+            "LINKER:-dead_strip"
+    )
+    set_property(
+        TARGET nuvio_engine
+        APPEND
+        PROPERTY LINK_DEPENDS "${NUVIO_ENGINE_APPLE_EXPORTS}"
+    )
+    set_target_properties(nuvio_engine PROPERTIES INSTALL_NAME_DIR "@rpath")
+endif()
 set_target_properties(
     nuvio_engine
     PROPERTIES

@@ -21,6 +21,7 @@ local.properties
 *.aar
 *.xcframework.zip
 /platform/apple/NuvioEngine.xcframework/
+/platform/macos/dist/
 /platform/linux/dist/
 /platform/windows/dist/
 *.dll
