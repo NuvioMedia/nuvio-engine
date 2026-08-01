@@ -25,6 +25,7 @@
 #include <libtorrent/hex.hpp>
 #include <libtorrent/load_torrent.hpp>
 #include <libtorrent/magnet_uri.hpp>
+#include <libtorrent/posix_disk_io.hpp>
 #include <libtorrent/read_resume_data.hpp>
 #include <libtorrent/session.hpp>
 #include <libtorrent/session_params.hpp>
@@ -158,6 +159,9 @@ struct SessionBootstrap {
 
 SessionBootstrap make_session_bootstrap(const ProtocolBackendConfig& config) {
     SessionBootstrap bootstrap{lt::session_params(make_settings(config)), {}};
+#if !defined(_WIN32)
+    bootstrap.params.disk_io_constructor = lt::posix_disk_io_constructor;
+#endif
     try {
         const auto state = storage::read_bounded_file(
             state_root(config) / "session.dht",
