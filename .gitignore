@@ -34,3 +34,6 @@ local.properties
 
 # Local-only inputs; never ship or commit extracted application bundles
 /.local-artifacts/
+/AGENTS.md
+
+/docs/

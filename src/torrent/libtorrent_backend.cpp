@@ -47,6 +47,7 @@ constexpr int peer_handshake_timeout_seconds = 20;
 constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
 constexpr int request_queue_seconds = 1;
+constexpr int maximum_outstanding_requests_per_peer = 64;
 
 struct TorrentProfileSettings {
     int connection_limit;
@@ -122,6 +123,11 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_int(lt::settings_pack::request_timeout, piece_request_timeout_seconds);
     settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
     settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
+    settings.set_int(
+        lt::settings_pack::max_out_request_queue,
+        maximum_outstanding_requests_per_peer
+    );
+    settings.set_int(lt::settings_pack::whole_pieces_threshold, 0);
     if (!config.tls_ca_bundle_path.empty()) {
         settings.set_str(
             lt::settings_pack::nuvio_ssl_ca_bundle,
