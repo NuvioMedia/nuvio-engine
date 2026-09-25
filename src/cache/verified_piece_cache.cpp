@@ -29,6 +29,10 @@ std::shared_ptr<std::vector<char>> VerifiedPieceCache::get(const PieceCacheKey& 
     return found->second.data;
 }
 
+bool VerifiedPieceCache::contains(const PieceCacheKey& key) const {
+    return entries_.contains(key);
+}
+
 void VerifiedPieceCache::put(
     PieceCacheKey key,
     std::shared_ptr<std::vector<char>> data

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,6 +39,7 @@ public:
     LibtorrentStreamBridge(
         std::uint16_t requested_port,
         std::uint64_t memory_capacity_bytes,
+        std::uint64_t disk_capacity_bytes,
         std::chrono::milliseconds inactivity_timeout
     );
     ~LibtorrentStreamBridge();
@@ -51,9 +53,12 @@ public:
         std::uint32_t file_index,
         const TorrentFileInfo& file
     );
+    void set_wakeup(std::function<void()> wake);
     void poll();
     [[nodiscard]] std::vector<StoppedStream> pop_expired_streams();
     void handle_read_piece(const lt::read_piece_alert& alert);
+    void handle_block_finished(const lt::block_finished_alert& alert);
+    void handle_hash_failed(const lt::hash_failed_alert& alert);
     [[nodiscard]] std::string stop_stream(const std::string& stream_id);
     [[nodiscard]] bool has_stream_for_torrent(const std::string& torrent_id);
     [[nodiscard]] std::vector<std::uint32_t> blocking_pieces(

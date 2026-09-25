@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     nuvio_engine
-    VERSION 0.1.1
+    VERSION 0.1.2
     DESCRIPTION "Cross-platform peer-to-peer streaming engine for Nuvio"
     LANGUAGES C CXX
 )
@@ -44,6 +44,7 @@ target_sources(
         src/scheduler/stream_demand_plan.cpp
         src/security/random_bytes.cpp
         src/storage/atomic_file.cpp
+        src/storage/payload_reader.cpp
         src/torrent/file_selection.cpp
 )
 

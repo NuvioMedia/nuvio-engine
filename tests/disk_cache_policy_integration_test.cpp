@@ -132,6 +132,44 @@ void write_payload(const std::filesystem::path& directory, const std::string& fi
 
 }
 
+NUVIO_TEST("payload cached before startup survives until its torrent is added") {
+    CachePolicyDirectories directories;
+    const std::string torrent_id = "13ade5f13f4e7ce4021a3cc82f72e504b9ef35ac";
+    write_payload(directories.payload(torrent_id), "test.bin");
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    config.disk_cache_capacity_bytes = 3;
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    constexpr std::array<unsigned char, 20> piece_hash{
+        0xa9, 0x4a, 0x8f, 0xe5, 0xcc, 0xb1, 0x9b, 0xa6, 0x1c, 0x4c,
+        0x08, 0x73, 0xd3, 0x91, 0xe9, 0x87, 0x98, 0x2f, 0xbb, 0xd3,
+    };
+    std::string data =
+        "d4:infod6:lengthi4e4:name8:test.bin12:piece lengthi16384e6:pieces20:";
+    data.append(piece_hash.begin(), piece_hash.end());
+    data += "ee";
+    NUVIO_EXPECT_EQ(add_torrent(engine, data), torrent_id);
+    const auto stream_id = prepare_stream(engine, torrent_id);
+
+    nuvio_engine_stream_stats stream_stats;
+    nuvio_engine_stream_stats_init(&stream_stats);
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (nuvio_engine_get_stream_stats(engine, stream_id.c_str(), &stream_stats) ==
+                NUVIO_ENGINE_STATUS_OK &&
+            stream_stats.verified_file_bytes == 4) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    NUVIO_EXPECT_TRUE(std::filesystem::exists(directories.payload(torrent_id) / "test.bin"));
+    NUVIO_EXPECT_EQ(stream_stats.verified_file_bytes, std::uint64_t(4));
+    nuvio_engine_destroy(engine);
+}
+
 NUVIO_TEST("protected cache pressure remains nonfatal during an active stream") {
     CachePolicyDirectories directories;
     nuvio_engine_config config;

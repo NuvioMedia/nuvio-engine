@@ -66,6 +66,9 @@ function(nuvio_engine_add_libtorrent)
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-apple-trust.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-windows-trust.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-windows-system-trust.patch"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-streaming-stall.patch"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-request-queue-limit.patch"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-block-start.patch"
     )
     set(
         nuvio_libtorrent_patch_files
@@ -74,6 +77,9 @@ function(nuvio_engine_add_libtorrent)
         "src/session_impl.cpp"
         "src/session_impl.cpp"
         "src/session_impl.cpp"
+        "src/torrent.cpp"
+        "src/bt_peer_connection.cpp"
+        "src/piece_picker.cpp"
     )
     set(
         nuvio_libtorrent_patch_sentinels
@@ -82,6 +88,9 @@ function(nuvio_engine_add_libtorrent)
         "nuvio_apple_configure_tls_trust"
         "nuvio_windows_configure_tls_trust"
         "live Windows store without replacing an explicit PEM store"
+        "nuvio_stall_budget_ms"
+        "nuvio_reqq"
+        "nuvio_block_start"
     )
     list(LENGTH nuvio_libtorrent_patches nuvio_libtorrent_patch_count)
     math(EXPR nuvio_libtorrent_last_patch "${nuvio_libtorrent_patch_count} - 1")

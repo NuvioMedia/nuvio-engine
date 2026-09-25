@@ -1,6 +1,7 @@
 #ifndef NUVIO_ENGINE_ENGINE_RUNTIME_HPP
 #define NUVIO_ENGINE_ENGINE_RUNTIME_HPP
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -89,9 +90,11 @@ private:
     };
 
     [[nodiscard]] nuvio_engine_status enqueue(Command command, std::uint64_t& request_id);
+    void wake();
     void run();
     void process_command(Command command);
     void collect_backend_events();
+    void refresh_stats();
     void push_event(torrent::BackendEvent event);
 
     std::unique_ptr<torrent::ProtocolBackend> backend_;
@@ -110,6 +113,8 @@ private:
     std::unordered_map<std::string, nuvio_engine_stream_stats> stream_stats_;
     std::thread worker_;
     bool stopping_ = false;
+    bool wake_pending_ = false;
+    std::chrono::steady_clock::time_point next_stats_refresh_{};
     std::uint64_t next_request_id_ = 1;
     std::uint64_t next_sequence_ = 1;
     std::uint64_t dropped_events_ = 0;

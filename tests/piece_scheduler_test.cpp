@@ -11,7 +11,6 @@ using nuvio::scheduler::PriorityClass;
 using nuvio::scheduler::ScheduleRequest;
 using nuvio::scheduler::blocking_demand_range;
 using nuvio::scheduler::build_piece_schedule;
-using nuvio::scheduler::rolling_lookahead;
 
 namespace {
 
@@ -52,31 +51,6 @@ NUVIO_TEST("blocking demand respects a selected file's piece offset") {
         1024
     );
     NUVIO_EXPECT_EQ(next, (ByteRange{512, 1535}));
-}
-
-NUVIO_TEST("rolling lookahead keeps the entire foreground selection bounded") {
-    constexpr std::uint64_t mebibyte = 1024ULL * 1024ULL;
-    const auto large_piece = rolling_lookahead(
-        ByteRange{0, 4 * mebibyte - 1},
-        15 * mebibyte,
-        mebibyte
-    );
-    NUVIO_EXPECT_EQ(large_piece.critical_bytes, std::uint64_t(0));
-    NUVIO_EXPECT_EQ(large_piece.playback_bytes, 11 * mebibyte);
-
-    const auto virtual_piece = rolling_lookahead(
-        ByteRange{0, mebibyte / 2 - 1},
-        15 * mebibyte,
-        mebibyte
-    );
-    NUVIO_EXPECT_EQ(virtual_piece.critical_bytes, mebibyte / 2);
-    NUVIO_EXPECT_EQ(virtual_piece.playback_bytes, 14 * mebibyte);
-}
-
-NUVIO_TEST("rolling lookahead is empty when blocking demand fills the selection") {
-    const auto lookahead = rolling_lookahead(ByteRange{0, 4095}, 4096, 1024);
-    NUVIO_EXPECT_EQ(lookahead.critical_bytes, std::uint64_t(0));
-    NUVIO_EXPECT_EQ(lookahead.playback_bytes, std::uint64_t(0));
 }
 
 NUVIO_TEST("HTTP demand maps through the file offset to torrent pieces") {

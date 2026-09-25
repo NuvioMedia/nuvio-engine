@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cctype>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -45,6 +46,8 @@ constexpr int peer_connect_timeout_seconds = 3;
 constexpr int peer_handshake_timeout_seconds = 20;
 constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
+constexpr int request_queue_seconds = 1;
+constexpr int maximum_outstanding_requests_per_peer = 64;
 
 struct TorrentProfileSettings {
     int connection_limit;
@@ -99,7 +102,7 @@ int bounded_rate(const std::uint64_t value) {
 lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     lt::settings_pack settings;
     const auto profile = torrent_profile_settings(config.torrent_profile);
-    settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.1");
+    settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.2");
     settings.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:0,[::]:0");
     settings.set_bool(lt::settings_pack::enable_dht, true);
     settings.set_bool(lt::settings_pack::enable_lsd, true);
@@ -118,6 +121,13 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     );
     settings.set_int(lt::settings_pack::torrent_connect_boost, profile.connect_boost);
     settings.set_int(lt::settings_pack::request_timeout, piece_request_timeout_seconds);
+    settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
+    settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
+    settings.set_int(
+        lt::settings_pack::max_out_request_queue,
+        maximum_outstanding_requests_per_peer
+    );
+    settings.set_int(lt::settings_pack::whole_pieces_threshold, 0);
     if (!config.tls_ca_bundle_path.empty()) {
         settings.set_str(
             lt::settings_pack::nuvio_ssl_ca_bundle,
@@ -134,7 +144,8 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
             lt::alert_category::status |
             lt::alert_category::performance_warning |
             lt::alert_category::dht |
-            lt::alert_category::file_progress
+            lt::alert_category::file_progress |
+            lt::alert_category::block_progress
     );
     if (config.upload_mode == NUVIO_ENGINE_UPLOAD_LIMITED) {
         settings.set_int(
@@ -449,11 +460,17 @@ public:
         pending_disk_reclaims_.push_back({request_id, target_bytes});
     }
 
+    void set_wakeup(std::function<void()> wake) override {
+        session_.set_alert_notify(wake);
+        stream_bridge_->set_wakeup(std::move(wake));
+    }
+
     void shutdown() override {
         if (shutting_down_) {
             return;
         }
         shutting_down_ = true;
+        session_.set_alert_notify({});
         stream_bridge_->shutdown();
         for (const auto& [id, handle] : handles_) {
             if (!pending_removals_.contains(id)) {
@@ -498,8 +515,12 @@ public:
         for (const auto* alert : alerts) {
             if (const auto* added = lt::alert_cast<lt::add_torrent_alert>(alert)) {
                 handle_added(*added, events);
+            } else if (const auto* block = lt::alert_cast<lt::block_finished_alert>(alert)) {
+                stream_bridge_->handle_block_finished(*block);
             } else if (const auto* piece = lt::alert_cast<lt::read_piece_alert>(alert)) {
                 stream_bridge_->handle_read_piece(*piece);
+            } else if (const auto* failed_hash = lt::alert_cast<lt::hash_failed_alert>(alert)) {
+                stream_bridge_->handle_hash_failed(*failed_hash);
             } else if (const auto* metadata = lt::alert_cast<lt::metadata_received_alert>(alert)) {
                 handle_metadata(*metadata, events);
             } else if (const auto* error = lt::alert_cast<lt::torrent_error_alert>(alert)) {
@@ -765,6 +786,7 @@ private:
         stream_bridge_ = std::make_unique<LibtorrentStreamBridge>(
             config.listen_port,
             config.memory_cache_capacity_bytes,
+            config.disk_cache_capacity_bytes,
             std::chrono::milliseconds(config.stream_inactivity_timeout_milliseconds)
         );
     }
@@ -1727,7 +1749,8 @@ private:
     std::chrono::steady_clock::time_point last_telemetry_request_ =
         std::chrono::steady_clock::now() - std::chrono::seconds(1);
     std::chrono::steady_clock::time_point next_warm_check_{};
-    std::chrono::steady_clock::time_point next_disk_cache_check_{};
+    std::chrono::steady_clock::time_point next_disk_cache_check_ =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
     std::string last_disk_cache_error_;
     bool shutting_down_ = false;
     lt::session session_;

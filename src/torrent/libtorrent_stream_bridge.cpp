@@ -6,6 +6,7 @@
 #include "scheduler/demand_window.hpp"
 #include "scheduler/stream_demand_plan.hpp"
 #include "security/random_bytes.hpp"
+#include "storage/payload_reader.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -14,6 +15,8 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -40,8 +43,21 @@ namespace {
 constexpr std::size_t maximum_http_commands = 4096;
 constexpr std::size_t stream_worker_count = 8;
 constexpr std::chrono::seconds piece_wait_timeout{60};
-constexpr std::uint64_t rolling_selection_limit = 15 * 1024 * 1024;
-constexpr std::uint64_t critical_front_limit = 1024 * 1024;
+constexpr std::uint64_t critical_window_bytes = 8 * 1024 * 1024;
+constexpr std::uint32_t critical_piece_limit = 16;
+constexpr std::uint64_t playback_window_bytes = 32 * 1024 * 1024;
+constexpr std::uint64_t minimum_readahead_bytes = 64 * 1024 * 1024;
+constexpr std::uint64_t maximum_readahead_bytes = 256 * 1024 * 1024;
+constexpr std::uint64_t metadata_tail_bytes = 2 * 1024 * 1024;
+constexpr std::uint64_t block_bytes = 16 * 1024;
+
+std::uint64_t readahead_for_disk_budget(const std::uint64_t disk_capacity_bytes) {
+    return std::clamp(
+        disk_capacity_bytes / 4,
+        minimum_readahead_bytes,
+        maximum_readahead_bytes
+    );
+}
 
 std::string torrent_id(const lt::torrent_handle& handle) {
     const auto hashes = handle.info_hashes();
@@ -88,25 +104,26 @@ std::string content_type_for_path(const std::string& path) {
 }
 
 lt::download_priority_t download_priority_for(
-    const scheduler::PriorityClass priority
+    const scheduler::PriorityClass priority,
+    const bool cold
 ) {
     switch (priority) {
     case scheduler::PriorityClass::blocking:
         return lt::top_priority;
     case scheduler::PriorityClass::critical:
-        return lt::download_priority_t{6};
+        return lt::top_priority;
     case scheduler::PriorityClass::playback:
         return lt::default_priority;
     case scheduler::PriorityClass::metadata_tail:
-        return lt::download_priority_t{3};
+        return cold ? lt::download_priority_t{6} : lt::top_priority;
     case scheduler::PriorityClass::readahead:
         return lt::low_priority;
     }
     return lt::dont_download;
 }
 
-int blocking_deadline_for(const std::size_t ordinal) {
-    const auto increment = std::min<std::size_t>(ordinal * 5, 400);
+int deadline_for(const std::size_t ordinal) {
+    const auto increment = std::min<std::size_t>(ordinal * 100, 2000);
     return static_cast<int>(increment);
 }
 
@@ -198,6 +215,7 @@ struct LibtorrentStreamBridge::Impl {
         std::uint32_t piece_size = 0;
         std::uint64_t file_offset = 0;
         std::uint64_t file_size = 0;
+        std::filesystem::path payload_path;
         std::shared_ptr<StreamActivity> activity;
         std::shared_ptr<StreamCounters> counters = std::make_shared<StreamCounters>();
     };
@@ -213,6 +231,7 @@ struct LibtorrentStreamBridge::Impl {
         bool done = false;
         bool cancelled = false;
         std::uint64_t demand_id = 0;
+        std::vector<bool> finished_blocks;
     };
 
     struct DemandState {
@@ -240,14 +259,23 @@ struct LibtorrentStreamBridge::Impl {
         StreamRoute route;
         http::ByteRange range{};
         std::shared_ptr<DemandState> state;
+        bool needs_data = true;
+    };
+
+    struct StreamAnchor {
+        StreamRoute route;
+        http::ByteRange range{};
+        bool prefetch = false;
     };
 
     struct CurrentSchedule {
         lt::torrent_handle handle;
         std::map<std::uint32_t, scheduler::PriorityClass> priorities;
-        std::vector<std::uint32_t> blocking_deadline_order;
+        std::vector<std::uint32_t> deadline_order;
         std::uint64_t focused_demand_id = 0;
         std::uint64_t revision = 0;
+        bool cold = false;
+        std::map<std::uint32_t, int> first_blocks;
     };
 
     struct DemandGuard {
@@ -278,12 +306,16 @@ struct LibtorrentStreamBridge::Impl {
     Impl(
         const std::uint16_t requested_port,
         const std::uint64_t memory_capacity_bytes,
+        const std::uint64_t disk_capacity_bytes,
         const std::chrono::milliseconds inactivity
     )
-        : rolling_selection_bytes(std::min(
-              memory_capacity_bytes,
-              rolling_selection_limit
-          )),
+        : window{
+              critical_window_bytes,
+              critical_piece_limit,
+              playback_window_bytes,
+              readahead_for_disk_budget(disk_capacity_bytes) - playback_window_bytes,
+              metadata_tail_bytes,
+          },
           inactivity_timeout(inactivity),
           piece_cache(memory_capacity_bytes),
           server(std::make_unique<http::LoopbackServer>(
@@ -329,6 +361,10 @@ struct LibtorrentStreamBridge::Impl {
             static_cast<std::uint32_t>(metadata->piece_length()),
             file.offset,
             file.size,
+            std::filesystem::path(metadata->files().file_path(
+                lt::file_index_t(static_cast<int>(file_index)),
+                handle.status(lt::torrent_handle::query_save_path).save_path
+            )),
             std::make_shared<StreamActivity>(std::chrono::steady_clock::now()),
         };
         route.target = "/stream/" + route.stream_id;
@@ -352,6 +388,14 @@ struct LibtorrentStreamBridge::Impl {
         next_progress_sample = {};
         last_ready_pieces.erase(id);
         revoked_torrents.erase(id);
+        if (route.file_size > 0) {
+            anchors.insert_or_assign(id, StreamAnchor{
+                route,
+                bounded_demand_range(route, {0, route.file_size - 1}, 0),
+                true,
+            });
+            recompute_schedule(id);
+        }
         return {
             route.stream_id,
             "http://127.0.0.1:" + std::to_string(server->port()) + route.target,
@@ -421,6 +465,12 @@ struct LibtorrentStreamBridge::Impl {
         );
     }
 
+    struct PieceSlice {
+        std::uint64_t piece_start = 0;
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+    };
+
     void stream_body(
         const std::uint64_t demand_id,
         const std::shared_ptr<DemandState>& demand_state,
@@ -443,6 +493,7 @@ struct LibtorrentStreamBridge::Impl {
         if (last_piece > std::numeric_limits<std::uint32_t>::max()) {
             return;
         }
+        std::optional<storage::PayloadReader> payload;
         for (auto piece = first_piece;
              piece <= last_piece && !token.stop_requested() &&
                  !demand_state->cancelled.load();
@@ -452,45 +503,36 @@ struct LibtorrentStreamBridge::Impl {
             if (current_absolute < route.file_offset) {
                 return;
             }
-            const auto current_position = current_absolute - route.file_offset;
-            const auto data = wait_for_piece(
-                demand_id,
-                demand_state,
-                route,
-                static_cast<std::uint32_t>(piece),
-                bounded_demand_range(route, range, current_position),
-                token
-            );
-            if (!data.has_value()) {
+            const PieceSlice slice{
+                piece_start,
+                current_absolute - piece_start,
+                std::min(absolute_end_exclusive, piece_start + route.piece_size) - piece_start,
+            };
+            if (!serve_piece(
+                    demand_id,
+                    demand_state,
+                    route,
+                    static_cast<std::uint32_t>(piece),
+                    slice,
+                    bounded_demand_range(route, range, current_absolute - route.file_offset),
+                    payload,
+                    writer,
+                    token
+                )) {
                 return;
             }
-            const auto slice_start = std::max(absolute_start, piece_start) - piece_start;
-            if ((*data)->size() >
-                std::numeric_limits<std::uint64_t>::max() - piece_start) {
-                return;
-            }
-            const auto available_end = piece_start + (*data)->size();
-            const auto slice_end = std::min(absolute_end_exclusive, available_end) - piece_start;
-            if (slice_start >= slice_end || slice_end > (*data)->size()) {
-                return;
-            }
-            const auto bytes = std::span<const char>(**data).subspan(
-                static_cast<std::size_t>(slice_start),
-                static_cast<std::size_t>(slice_end - slice_start)
-            );
-            if (!writer(bytes)) {
-                return;
-            }
-            add_delivered_bytes(route.counters, static_cast<std::uint64_t>(bytes.size()));
         }
     }
 
-    std::optional<std::shared_ptr<std::vector<char>>> wait_for_piece(
+    bool serve_piece(
         const std::uint64_t demand_id,
         const std::shared_ptr<DemandState>& demand_state,
         const StreamRoute& route,
         const std::uint32_t piece,
+        const PieceSlice slice,
         const http::ByteRange demand_range,
+        std::optional<storage::PayloadReader>& payload,
+        const http::LoopbackServer::Writer& writer,
         const std::stop_token token
     ) {
         auto waiter = std::make_shared<PieceWaiter>();
@@ -504,26 +546,99 @@ struct LibtorrentStreamBridge::Impl {
                 waiter,
                 demand_state,
             })) {
-            return std::nullopt;
+            return false;
         }
-        const auto deadline = std::chrono::steady_clock::now() + piece_wait_timeout;
         std::stop_callback stop_wait(token, [waiter] {
             {
                 std::lock_guard lock(waiter->mutex);
             }
             waiter->ready.notify_all();
         });
-        std::unique_lock lock(waiter->mutex);
-        waiter->ready.wait_until(lock, deadline, [&] {
-            return waiter->done || token.stop_requested() ||
-                demand_state->cancelled.load();
-        });
-        if (!waiter->done || token.stop_requested() ||
-            demand_state->cancelled.load() || !waiter->error.empty()) {
+        const auto abandon = [&] {
+            std::lock_guard lock(waiter->mutex);
             waiter->cancelled = true;
-            return std::nullopt;
+        };
+        auto cursor = slice.begin;
+        auto deadline = std::chrono::steady_clock::now() + piece_wait_timeout;
+        auto payload_readable = !payload.has_value() || payload->is_open();
+        std::vector<char> buffer;
+        while (cursor < slice.end) {
+            std::shared_ptr<std::vector<char>> verified;
+            std::uint64_t unverified_end = cursor;
+            {
+                std::unique_lock lock(waiter->mutex);
+                const auto unverified_ready = [&] {
+                    return payload_readable &&
+                        finished_run_end(waiter->finished_blocks, cursor, slice.end) > cursor;
+                };
+                waiter->ready.wait_until(lock, deadline, [&] {
+                    return waiter->done || token.stop_requested() ||
+                        demand_state->cancelled.load() || unverified_ready();
+                });
+                if (token.stop_requested() || demand_state->cancelled.load() ||
+                    (waiter->done && !waiter->error.empty())) {
+                    waiter->cancelled = true;
+                    return false;
+                }
+                if (waiter->done) {
+                    verified = waiter->data;
+                } else if (unverified_ready()) {
+                    unverified_end = finished_run_end(
+                        waiter->finished_blocks,
+                        cursor,
+                        slice.end
+                    );
+                } else {
+                    waiter->cancelled = true;
+                    return false;
+                }
+            }
+            if (verified) {
+                if (slice.end > verified->size()) {
+                    return false;
+                }
+                const auto bytes = std::span<const char>(*verified).subspan(
+                    static_cast<std::size_t>(cursor),
+                    static_cast<std::size_t>(slice.end - cursor)
+                );
+                if (!writer(bytes)) {
+                    return false;
+                }
+                add_delivered_bytes(route.counters, static_cast<std::uint64_t>(bytes.size()));
+                return true;
+            }
+            if (!payload.has_value()) {
+                payload.emplace(route.payload_path);
+            }
+            buffer.resize(static_cast<std::size_t>(unverified_end - cursor));
+            const auto absolute = slice.piece_start + cursor;
+            if (absolute < route.file_offset ||
+                !payload->read_exact(absolute - route.file_offset, buffer)) {
+                payload_readable = false;
+                continue;
+            }
+            if (!writer(buffer)) {
+                abandon();
+                return false;
+            }
+            add_delivered_bytes(route.counters, static_cast<std::uint64_t>(buffer.size()));
+            cursor = unverified_end;
+            deadline = std::chrono::steady_clock::now() + piece_wait_timeout;
         }
-        return waiter->data;
+        abandon();
+        return true;
+    }
+
+    static std::uint64_t finished_run_end(
+        const std::vector<bool>& blocks,
+        const std::uint64_t cursor,
+        const std::uint64_t limit
+    ) {
+        auto block = cursor / block_bytes;
+        while (block < blocks.size() && blocks[static_cast<std::size_t>(block)]) {
+            ++block;
+        }
+        return std::min(block * block_bytes, limit);
     }
 
     bool enqueue(HttpCommand command) {
@@ -535,12 +650,23 @@ struct LibtorrentStreamBridge::Impl {
             return false;
         }
         commands.push_back(std::move(command));
+        if (wake) {
+            wake();
+        }
         return true;
     }
 
     void enqueue_end(const std::uint64_t demand_id) {
         std::lock_guard lock(commands_mutex);
         commands.push_back({CommandType::end_demand, demand_id, {}, {}, 0, {}, {}});
+        if (wake) {
+            wake();
+        }
+    }
+
+    void set_wakeup(std::function<void()> callback) {
+        std::lock_guard lock(commands_mutex);
+        wake = std::move(callback);
     }
 
     void poll() {
@@ -556,11 +682,19 @@ struct LibtorrentStreamBridge::Impl {
                 if (!revoked_torrents.contains(command.route.torrent_id) &&
                     route_is_active(command.route)) {
                     const auto id = command.route.torrent_id;
+                    const auto needs_data = !piece_available(
+                        command.route,
+                        static_cast<std::uint32_t>(
+                            (command.route.file_offset + command.range.start) /
+                            command.route.piece_size
+                        )
+                    );
                     active_demands.insert_or_assign(command.demand_id, ActiveDemand{
                         command.demand_id,
                         std::move(command.route),
                         command.range,
                         std::move(command.demand_state),
+                        needs_data,
                     });
                     changed_torrents.insert(id);
                 } else if (command.demand_state) {
@@ -581,7 +715,7 @@ struct LibtorrentStreamBridge::Impl {
                     !demand->second.state->cancelled.load()) {
                     demand->second.range = command.range;
                     changed_torrents.insert(demand->second.route.torrent_id);
-                    process_piece_request(command);
+                    process_piece_request(command, demand->second);
                 } else if (command.waiter) {
                     complete_waiter(command.waiter, {}, "stream demand is no longer active");
                 }
@@ -592,7 +726,39 @@ struct LibtorrentStreamBridge::Impl {
         for (const auto& id : changed_torrents) {
             recompute_schedule(id);
         }
+        reissue_stalled_reads();
         expire_inactive_streams();
+    }
+
+    void reissue_stalled_reads() {
+        const auto now = std::chrono::steady_clock::now();
+        if (piece_waiters.empty() || now < next_read_watchdog) {
+            return;
+        }
+        next_read_watchdog = now + std::chrono::seconds(1);
+        for (const auto& [key, waiters] : piece_waiters) {
+            static_cast<void>(waiters);
+            const auto requested = requested_reads.find(key);
+            if (requested != requested_reads.end() &&
+                now - requested->second < std::chrono::seconds(2)) {
+                continue;
+            }
+            const auto demand = std::ranges::find_if(active_demands, [&](const auto& entry) {
+                return entry.second.route.torrent_id == key.torrent_id;
+            });
+            if (demand == active_demands.end()) {
+                continue;
+            }
+            const auto& handle = demand->second.route.handle;
+            try {
+                const auto index = lt::piece_index_t(static_cast<int>(key.piece));
+                if (handle.have_piece(index)) {
+                    handle.read_piece(index);
+                    requested_reads.insert_or_assign(key, now);
+                }
+            } catch (...) {
+            }
+        }
     }
 
     void expire_inactive_streams() {
@@ -631,6 +797,7 @@ struct LibtorrentStreamBridge::Impl {
             }
         }
         for (auto& stream : expired) {
+            erase_anchor(stream.stream_id);
             recompute_schedule(stream.torrent_id);
             expired_streams.push_back(std::move(stream));
         }
@@ -665,6 +832,7 @@ struct LibtorrentStreamBridge::Impl {
                 return waiter->demand_id == demand_id;
             });
             if (waiters.empty()) {
+                partial_blocks.erase(entry->first);
                 entry = piece_waiters.erase(entry);
             } else {
                 ++entry;
@@ -672,7 +840,24 @@ struct LibtorrentStreamBridge::Impl {
         }
     }
 
-    void process_piece_request(const HttpCommand& command) {
+    bool piece_available(const StreamRoute& route, const std::uint32_t piece) {
+        if (piece_cache.contains(PieceKey{route.torrent_id, piece})) {
+            return true;
+        }
+        try {
+            return route.handle.have_piece(lt::piece_index_t(static_cast<int>(piece)));
+        } catch (...) {
+            return false;
+        }
+    }
+
+    void erase_anchor(const std::string& stream_id) {
+        std::erase_if(anchors, [&](const auto& anchor) {
+            return anchor.second.route.stream_id == stream_id;
+        });
+    }
+
+    void process_piece_request(const HttpCommand& command, ActiveDemand& demand) {
         if (!command.waiter) {
             return;
         }
@@ -689,10 +874,127 @@ struct LibtorrentStreamBridge::Impl {
         const PieceKey key{command.route.torrent_id, command.piece};
         if (auto cached = piece_cache.get(key)) {
             last_ready_pieces.insert_or_assign(command.route.torrent_id, command.piece);
+            demand.needs_data = false;
             complete_waiter(command.waiter, std::move(cached), {});
             return;
         }
         piece_waiters[key].push_back(command.waiter);
+        demand.needs_data = !piece_available(command.route, command.piece);
+        if (!demand.needs_data) {
+            if (requested_reads.try_emplace(key, std::chrono::steady_clock::now()).second) {
+                try {
+                    command.route.handle.read_piece(
+                        lt::piece_index_t(static_cast<int>(command.piece))
+                    );
+                } catch (...) {
+                    requested_reads.erase(key);
+                    fail_piece(key, "failed to read a downloaded piece");
+                }
+            }
+            return;
+        }
+        auto partial = partial_blocks.find(key);
+        if (partial == partial_blocks.end()) {
+            partial = partial_blocks.emplace(
+                key,
+                written_blocks(command.route.handle, *metadata, command.piece)
+            ).first;
+        }
+        publish_blocks(command.waiter, partial->second);
+    }
+
+    static std::vector<bool> written_blocks(
+        const lt::torrent_handle& handle,
+        const lt::torrent_info& metadata,
+        const std::uint32_t piece
+    ) {
+        const auto index = lt::piece_index_t(static_cast<int>(piece));
+        const auto piece_bytes = static_cast<std::uint64_t>(
+            std::max(metadata.piece_size(index), 0)
+        );
+        std::vector<bool> blocks(
+            static_cast<std::size_t>((piece_bytes + block_bytes - 1) / block_bytes),
+            false
+        );
+        try {
+            std::vector<lt::partial_piece_info> queue;
+            handle.get_download_queue(queue);
+            for (const auto& partial : queue) {
+                if (partial.piece_index != index) {
+                    continue;
+                }
+                const auto count = std::min(
+                    blocks.size(),
+                    static_cast<std::size_t>(std::max(partial.blocks_in_piece, 0))
+                );
+                for (std::size_t block = 0; block < count; ++block) {
+                    blocks[block] = partial.blocks[block].state == lt::block_info::finished;
+                }
+            }
+        } catch (...) {
+        }
+        return blocks;
+    }
+
+    static void publish_blocks(
+        const std::shared_ptr<PieceWaiter>& waiter,
+        const std::vector<bool>& blocks
+    ) {
+        {
+            std::lock_guard lock(waiter->mutex);
+            if (waiter->done || waiter->cancelled) {
+                return;
+            }
+            waiter->finished_blocks = blocks;
+        }
+        waiter->ready.notify_all();
+    }
+
+    void publish_partial(const PieceKey& key) {
+        const auto partial = partial_blocks.find(key);
+        const auto waiters = piece_waiters.find(key);
+        if (partial == partial_blocks.end() || waiters == piece_waiters.end()) {
+            return;
+        }
+        for (const auto& waiter : waiters->second) {
+            publish_blocks(waiter, partial->second);
+        }
+    }
+
+    void handle_block_finished(const lt::block_finished_alert& alert) {
+        if (partial_blocks.empty()) {
+            return;
+        }
+        const PieceKey key{
+            torrent_id(alert.handle),
+            static_cast<std::uint32_t>(static_cast<int>(alert.piece_index)),
+        };
+        const auto partial = partial_blocks.find(key);
+        if (partial == partial_blocks.end() || alert.block_index < 0 ||
+            static_cast<std::size_t>(alert.block_index) >= partial->second.size()) {
+            return;
+        }
+        const auto first_data = std::ranges::none_of(partial->second, [](const bool finished) {
+            return finished;
+        });
+        partial->second[static_cast<std::size_t>(alert.block_index)] = true;
+        publish_partial(key);
+        if (first_data) {
+            recompute_schedule(key.torrent_id);
+        }
+    }
+
+    void handle_hash_failed(const lt::hash_failed_alert& alert) {
+        const PieceKey key{
+            torrent_id(alert.handle),
+            static_cast<std::uint32_t>(static_cast<int>(alert.piece_index)),
+        };
+        const auto partial = partial_blocks.find(key);
+        if (partial == partial_blocks.end()) {
+            return;
+        }
+        std::fill(partial->second.begin(), partial->second.end(), false);
+        publish_partial(key);
     }
 
     void recompute_schedule(const std::string& id) {
@@ -700,30 +1002,65 @@ struct LibtorrentStreamBridge::Impl {
         std::optional<lt::torrent_handle> handle;
         std::vector<scheduler::StreamDemand> demands;
         for (const auto& [demand_id, demand] : active_demands) {
-            if (demand.route.torrent_id != id) {
+            if (demand.route.torrent_id != id || !demand.needs_data) {
                 continue;
             }
             handle = demand.route.handle;
+            const auto blocking_piece = static_cast<std::uint32_t>(
+                (demand.route.file_offset + demand.range.start) / demand.route.piece_size
+            );
+            const auto partial = partial_blocks.find(PieceKey{id, blocking_piece});
             demands.push_back({
                 demand_id,
                 demand.route.file_offset,
                 demand.route.file_size,
                 demand.route.piece_size,
                 demand.range,
+                scheduler::DemandKind::reader,
+                partial == partial_blocks.end() ||
+                    std::ranges::none_of(partial->second, [](const bool finished) {
+                        return finished;
+                    }),
             });
+        }
+        const auto anchor = anchors.find(id);
+        if (demands.empty() && anchor != anchors.end()) {
+            handle = anchor->second.route.handle;
+            demands.push_back({
+                0,
+                anchor->second.route.file_offset,
+                anchor->second.route.file_size,
+                anchor->second.route.piece_size,
+                anchor->second.range,
+                anchor->second.prefetch
+                    ? scheduler::DemandKind::prefetch
+                    : scheduler::DemandKind::anchor,
+            });
+        }
+        std::map<std::uint32_t, int> first_blocks;
+        for (const auto& demand : demands) {
+            const auto absolute = demand.file_offset + demand.range.start;
+            first_blocks.insert_or_assign(
+                static_cast<std::uint32_t>(absolute / demand.piece_size),
+                static_cast<int>((absolute % demand.piece_size) / block_bytes)
+            );
         }
         scheduler::StreamDemandPlan plan;
         try {
-            plan = scheduler::build_stream_demand_plan(
-                std::move(demands),
-                rolling_selection_bytes,
-                critical_front_limit
-            );
+            plan = scheduler::build_stream_demand_plan(std::move(demands), window);
             for (const auto& priority : plan.pieces) {
                 combined.insert_or_assign(priority.piece, priority.priority);
             }
         } catch (...) {
             return;
+        }
+        if (const auto focused = active_demands.find(plan.focused_demand_id);
+            focused != active_demands.end()) {
+            anchors.insert_or_assign(id, StreamAnchor{
+                focused->second.route,
+                focused->second.range,
+                false,
+            });
         }
         const auto previous = current_schedules.find(id);
         if (!handle.has_value() && previous != current_schedules.end()) {
@@ -738,24 +1075,9 @@ struct LibtorrentStreamBridge::Impl {
             combined = previous->second.priorities;
             for (auto& [piece, priority] : combined) {
                 static_cast<void>(piece);
-                if (priority == scheduler::PriorityClass::blocking) {
+                if (priority == scheduler::PriorityClass::blocking ||
+                    priority == scheduler::PriorityClass::critical) {
                     priority = scheduler::PriorityClass::playback;
-                }
-            }
-        }
-
-        if (previous != current_schedules.end()) {
-            for (const auto& [piece, priority] : previous->second.priorities) {
-                const auto replacement = combined.find(piece);
-                if (priority == scheduler::PriorityClass::blocking &&
-                    (replacement == combined.end() ||
-                     replacement->second != scheduler::PriorityClass::blocking)) {
-                    try {
-                        handle->reset_piece_deadline(
-                            lt::piece_index_t(static_cast<int>(piece))
-                        );
-                    } catch (...) {
-                    }
                 }
             }
         }
@@ -770,7 +1092,7 @@ struct LibtorrentStreamBridge::Impl {
                     );
                     for (const auto& [piece, priority] : combined) {
                         if (piece < priorities.size()) {
-                            priorities[piece] = download_priority_for(priority);
+                            priorities[piece] = download_priority_for(priority, plan.cold);
                         }
                     }
                     handle->prioritize_pieces(priorities);
@@ -790,10 +1112,11 @@ struct LibtorrentStreamBridge::Impl {
                 for (const auto& [piece, priority] : combined) {
                     const auto old = previous->second.priorities.find(piece);
                     if (old == previous->second.priorities.end() ||
-                        old->second != priority) {
+                        download_priority_for(old->second, previous->second.cold) !=
+                            download_priority_for(priority, plan.cold)) {
                         updates.emplace_back(
                             lt::piece_index_t(static_cast<int>(piece)),
-                            download_priority_for(priority)
+                            download_priority_for(priority, plan.cold)
                         );
                     }
                 }
@@ -803,31 +1126,92 @@ struct LibtorrentStreamBridge::Impl {
             }
         } catch (...) {
         }
-        for (std::size_t ordinal = 0;
-             ordinal < plan.blocking_deadline_order.size();
-             ++ordinal) {
-            const auto piece = plan.blocking_deadline_order[ordinal];
-            const auto priority = combined.find(piece);
-            if (priority == combined.end() ||
-                priority->second != scheduler::PriorityClass::blocking) {
+
+        static const std::vector<std::uint32_t> no_deadlines;
+        const auto& previous_deadlines = previous == current_schedules.end()
+            ? no_deadlines
+            : previous->second.deadline_order;
+        const auto& next_deadlines = plan.deadline_order;
+        const auto in_next = [&](const std::uint32_t piece) {
+            return std::ranges::find(next_deadlines, piece) != next_deadlines.end();
+        };
+        const auto in_previous = [&](const std::uint32_t piece) {
+            return std::ranges::find(previous_deadlines, piece) != previous_deadlines.end();
+        };
+        const auto reset_deadline = [&](const std::uint32_t piece) {
+            try {
+                handle->reset_piece_deadline(lt::piece_index_t(static_cast<int>(piece)));
+            } catch (...) {
+            }
+            requested_reads.erase(PieceKey{id, piece});
+        };
+        const auto jumped = !previous_deadlines.empty() && !next_deadlines.empty() &&
+            std::ranges::none_of(previous_deadlines, in_next);
+        if (jumped) {
+            for (const auto piece : previous_deadlines) {
+                reset_deadline(piece);
+            }
+        }
+        for (std::size_t ordinal = 0; ordinal < next_deadlines.size(); ++ordinal) {
+            const auto piece = next_deadlines[ordinal];
+            const PieceKey key{id, piece};
+            const auto read_requested = requested_reads.contains(key);
+            const auto wants_read = piece_waiters.contains(key) && !read_requested;
+            const auto unchanged = !jumped &&
+                ordinal < previous_deadlines.size() &&
+                previous_deadlines[ordinal] == piece;
+            if (unchanged && !wants_read) {
                 continue;
             }
             try {
-                const PieceKey key{id, piece};
-                const auto flags = piece_waiters.contains(key)
-                    ? lt::torrent_handle::alert_when_available
-                    : lt::deadline_flags_t{};
                 handle->set_piece_deadline(
                     lt::piece_index_t(static_cast<int>(piece)),
-                    blocking_deadline_for(ordinal),
-                    flags
+                    deadline_for(ordinal),
+                    wants_read || read_requested
+                        ? lt::torrent_handle::alert_when_available
+                        : lt::deadline_flags_t{}
                 );
+                if (wants_read) {
+                    requested_reads.try_emplace(key, std::chrono::steady_clock::now());
+                }
             } catch (const std::exception& error) {
-                fail_piece(PieceKey{id, piece}, error.what());
+                fail_piece(key, error.what());
             } catch (...) {
-                fail_piece(PieceKey{id, piece}, "failed to request blocking piece");
+                fail_piece(key, "failed to request blocking piece");
             }
         }
+        if (!jumped) {
+            for (const auto piece : previous_deadlines) {
+                if (!in_next(piece)) {
+                    reset_deadline(piece);
+                }
+            }
+        }
+        std::map<std::uint32_t, int> applied_first_blocks;
+        for (const auto piece : next_deadlines) {
+            const auto wanted = first_blocks.find(piece);
+            const auto block = wanted == first_blocks.end() ? 0 : wanted->second;
+            const auto previous_block = [&] {
+                if (jumped || previous == current_schedules.end()) {
+                    return 0;
+                }
+                const auto found = previous->second.first_blocks.find(piece);
+                return found == previous->second.first_blocks.end() ? 0 : found->second;
+            }();
+            if (block != previous_block || (block > 0 && !in_previous(piece))) {
+                try {
+                    handle->set_piece_first_block(
+                        lt::piece_index_t(static_cast<int>(piece)),
+                        block
+                    );
+                } catch (...) {
+                }
+            }
+            if (block > 0) {
+                applied_first_blocks.emplace(piece, block);
+            }
+        }
+
         if (combined.empty()) {
             current_schedules.erase(id);
         } else {
@@ -836,8 +1220,7 @@ struct LibtorrentStreamBridge::Impl {
                 : previous->second.revision +
                     static_cast<std::uint64_t>(
                         previous->second.priorities != combined ||
-                        previous->second.blocking_deadline_order !=
-                            plan.blocking_deadline_order ||
+                        previous->second.deadline_order != plan.deadline_order ||
                         previous->second.focused_demand_id != plan.focused_demand_id
                     );
             current_schedules.insert_or_assign(
@@ -845,9 +1228,11 @@ struct LibtorrentStreamBridge::Impl {
                 CurrentSchedule{
                     *handle,
                     std::move(combined),
-                    std::move(plan.blocking_deadline_order),
+                    std::move(plan.deadline_order),
                     plan.focused_demand_id,
                     revision,
+                    plan.cold,
+                    std::move(applied_first_blocks),
                 }
             );
         }
@@ -858,6 +1243,8 @@ struct LibtorrentStreamBridge::Impl {
             torrent_id(alert.handle),
             static_cast<std::uint32_t>(static_cast<int>(alert.piece)),
         };
+        requested_reads.erase(key);
+        partial_blocks.erase(key);
         if (alert.error || !alert.buffer || alert.size <= 0) {
             fail_piece(key, alert.error ? alert.error.message() : "verified piece is empty");
             return;
@@ -896,6 +1283,7 @@ struct LibtorrentStreamBridge::Impl {
     }
 
     void fail_piece(const PieceKey& key, const std::string& error) {
+        partial_blocks.erase(key);
         const auto found = piece_waiters.find(key);
         if (found == piece_waiters.end()) {
             return;
@@ -914,6 +1302,7 @@ struct LibtorrentStreamBridge::Impl {
                 return waiter->cancelled;
             });
             if (waiters.empty()) {
+                partial_blocks.erase(entry->first);
                 entry = piece_waiters.erase(entry);
             } else {
                 ++entry;
@@ -923,8 +1312,15 @@ struct LibtorrentStreamBridge::Impl {
 
     void remove_torrent(const std::string& id) {
         revoked_torrents.insert(id);
+        anchors.erase(id);
         piece_cache.erase_torrent(id);
         last_ready_pieces.erase(id);
+        std::erase_if(requested_reads, [&](const auto& entry) {
+            return entry.first.torrent_id == id;
+        });
+        std::erase_if(partial_blocks, [&](const auto& entry) {
+            return entry.first.torrent_id == id;
+        });
         {
             std::lock_guard lock(routes_mutex);
             std::erase_if(routes, [&](const auto& route) {
@@ -967,12 +1363,25 @@ struct LibtorrentStreamBridge::Impl {
         if (schedule == current_schedules.end()) {
             return {};
         }
-        return schedule->second.blocking_deadline_order;
+        return blocking_pieces_of(schedule->second);
+    }
+
+    static std::vector<std::uint32_t> blocking_pieces_of(const CurrentSchedule& schedule) {
+        std::vector<std::uint32_t> result;
+        for (const auto piece : schedule.deadline_order) {
+            const auto priority = schedule.priorities.find(piece);
+            if (priority != schedule.priorities.end() &&
+                priority->second == scheduler::PriorityClass::blocking) {
+                result.push_back(piece);
+            }
+        }
+        return result;
     }
 
     std::string stop_stream(const std::string& stream_id) {
         std::string id;
         const auto target = "/stream/" + stream_id;
+        erase_anchor(stream_id);
         {
             std::lock_guard lock(routes_mutex);
             const auto route = routes.find(target);
@@ -1033,16 +1442,13 @@ struct LibtorrentStreamBridge::Impl {
             schedule != current_schedules.end()) {
             result.scheduled_pieces = saturating_count(schedule->second.priorities.size());
             result.schedule_revision = schedule->second.revision;
-            result.blocking_pieces = saturating_count(
-                schedule->second.blocking_deadline_order.size()
-            );
-            if (!schedule->second.blocking_deadline_order.empty()) {
-                result.primary_blocking_piece =
-                    schedule->second.blocking_deadline_order[0];
+            const auto blocking = blocking_pieces_of(schedule->second);
+            result.blocking_pieces = saturating_count(blocking.size());
+            if (!blocking.empty()) {
+                result.primary_blocking_piece = blocking[0];
             }
-            if (schedule->second.blocking_deadline_order.size() > 1) {
-                result.secondary_blocking_piece =
-                    schedule->second.blocking_deadline_order[1];
+            if (blocking.size() > 1) {
+                result.secondary_blocking_piece = blocking[1];
             }
         }
         if (const auto ready = last_ready_pieces.find(route.torrent_id);
@@ -1149,6 +1555,7 @@ struct LibtorrentStreamBridge::Impl {
         {
             std::lock_guard lock(commands_mutex);
             commands.clear();
+            wake = nullptr;
         }
         for (const auto& [id, schedule] : current_schedules) {
             static_cast<void>(id);
@@ -1158,6 +1565,9 @@ struct LibtorrentStreamBridge::Impl {
             }
         }
         current_schedules.clear();
+        requested_reads.clear();
+        partial_blocks.clear();
+        anchors.clear();
         last_ready_pieces.clear();
         piece_cache.clear();
         for (auto& [id, demand] : active_demands) {
@@ -1175,7 +1585,7 @@ struct LibtorrentStreamBridge::Impl {
         stream_progress_cache.clear();
     }
 
-    const std::uint64_t rolling_selection_bytes;
+    const scheduler::StreamWindow window;
     const std::chrono::milliseconds inactivity_timeout;
     std::mutex routes_mutex;
     std::unordered_map<std::string, StreamRoute> routes;
@@ -1185,10 +1595,16 @@ struct LibtorrentStreamBridge::Impl {
     std::deque<HttpCommand> commands;
     std::atomic_uint64_t next_demand_id = 1;
     std::unordered_map<std::uint64_t, ActiveDemand> active_demands;
+    std::unordered_map<std::string, StreamAnchor> anchors;
     std::unordered_map<std::string, CurrentSchedule> current_schedules;
     std::unordered_map<std::string, std::uint32_t> last_ready_pieces;
     std::unordered_map<PieceKey, std::vector<std::shared_ptr<PieceWaiter>>, PieceKeyHash>
         piece_waiters;
+    std::unordered_map<PieceKey, std::chrono::steady_clock::time_point, PieceKeyHash>
+        requested_reads;
+    std::chrono::steady_clock::time_point next_read_watchdog{};
+    std::unordered_map<PieceKey, std::vector<bool>, PieceKeyHash> partial_blocks;
+    std::function<void()> wake;
     std::unordered_set<std::string> revoked_torrents;
     std::vector<StoppedStream> expired_streams;
     std::chrono::steady_clock::time_point next_inactivity_check{};
@@ -1207,13 +1623,19 @@ struct LibtorrentStreamBridge::Impl {
 LibtorrentStreamBridge::LibtorrentStreamBridge(
     const std::uint16_t requested_port,
     const std::uint64_t memory_capacity_bytes,
+    const std::uint64_t disk_capacity_bytes,
     const std::chrono::milliseconds inactivity_timeout
 )
     : impl_(std::make_unique<Impl>(
           requested_port,
           memory_capacity_bytes,
+          disk_capacity_bytes,
           inactivity_timeout
       )) {
+}
+
+void LibtorrentStreamBridge::set_wakeup(std::function<void()> wake) {
+    impl_->set_wakeup(std::move(wake));
 }
 
 LibtorrentStreamBridge::~LibtorrentStreamBridge() = default;
@@ -1237,6 +1659,14 @@ std::vector<StoppedStream> LibtorrentStreamBridge::pop_expired_streams() {
 
 void LibtorrentStreamBridge::handle_read_piece(const lt::read_piece_alert& alert) {
     impl_->handle_read_piece(alert);
+}
+
+void LibtorrentStreamBridge::handle_block_finished(const lt::block_finished_alert& alert) {
+    impl_->handle_block_finished(alert);
+}
+
+void LibtorrentStreamBridge::handle_hash_failed(const lt::hash_failed_alert& alert) {
+    impl_->handle_hash_failed(alert);
 }
 
 std::string LibtorrentStreamBridge::stop_stream(const std::string& stream_id) {

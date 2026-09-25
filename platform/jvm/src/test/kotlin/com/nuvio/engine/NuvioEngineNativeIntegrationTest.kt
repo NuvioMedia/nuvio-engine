@@ -36,7 +36,7 @@ class NuvioEngineNativeIntegrationTest {
         payload.writeBytes(CONTENT)
 
         val runtime = NuvioEngineRuntime.load(library)
-        assertEquals("0.1.1", runtime.version)
+        assertEquals("0.1.2", runtime.version)
         assertTrue(runtime.protocolBackendVersion.contains("2.0.12"))
         val engine = runtime.create(
             NuvioEngineConfig(
