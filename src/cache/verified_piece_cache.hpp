@@ -35,6 +35,7 @@ public:
     explicit VerifiedPieceCache(std::uint64_t capacity_bytes);
 
     [[nodiscard]] std::shared_ptr<std::vector<char>> get(const PieceCacheKey& key);
+    [[nodiscard]] bool contains(const PieceCacheKey& key) const;
     void put(PieceCacheKey key, std::shared_ptr<std::vector<char>> data);
     void erase_torrent(const std::string& torrent_id);
     void clear();

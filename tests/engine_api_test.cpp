@@ -1176,7 +1176,7 @@ NUVIO_TEST("stream inactivity begins after the final HTTP request ends") {
     }
     NUVIO_EXPECT_TRUE(received_reprepared_stats);
     NUVIO_EXPECT_EQ(reprepared_stats.active_demands, std::uint32_t(0));
-    NUVIO_EXPECT_EQ(reprepared_stats.scheduled_pieces, std::uint32_t(0));
+    NUVIO_EXPECT_EQ(reprepared_stats.scheduled_pieces, std::uint32_t(1));
     NUVIO_EXPECT_EQ(reprepared_stats.blocking_pieces, std::uint32_t(0));
     nuvio_engine_destroy(engine);
 }
@@ -1852,7 +1852,7 @@ NUVIO_TEST("concurrent distant HTTP ranges remain blocking until disconnect") {
     NUVIO_EXPECT_EQ(range_stats.blocking_pieces, std::uint32_t(3));
     NUVIO_EXPECT_EQ(range_stats.primary_blocking_piece, std::uint32_t(2'048));
     NUVIO_EXPECT_EQ(range_stats.secondary_blocking_piece, std::uint32_t(4'095));
-    NUVIO_EXPECT_TRUE(range_stats.scheduled_pieces <= std::uint32_t(960));
+    NUVIO_EXPECT_EQ(range_stats.scheduled_pieces, std::uint32_t(2'049));
     NUVIO_EXPECT_TRUE(range_stats.schedule_revision >= std::uint64_t(1));
 
     RawHttpClient fourth(

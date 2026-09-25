@@ -1,31 +1,11 @@
 #include "scheduler/stream_demand_plan.hpp"
 
-#include "scheduler/demand_window.hpp"
-
 #include <algorithm>
-#include <limits>
 #include <map>
 #include <set>
 
 namespace nuvio::scheduler {
 namespace {
-
-std::vector<PiecePriority> schedule_for(
-    const StreamDemand& demand,
-    const std::uint64_t critical_bytes,
-    const std::uint64_t playback_bytes
-) {
-    return build_piece_schedule({
-        demand.file_offset,
-        demand.file_size,
-        demand.piece_size,
-        demand.range,
-        critical_bytes,
-        playback_bytes,
-        0,
-        0,
-    });
-}
 
 void merge_schedule(
     std::map<std::uint32_t, PriorityClass>& combined,
@@ -39,22 +19,11 @@ void merge_schedule(
     }
 }
 
-std::uint64_t physical_piece_budget(
-    const std::uint64_t selection_bytes,
-    const std::uint32_t piece_size
-) {
-    if (selection_bytes == 0 || piece_size == 0) {
-        return 0;
-    }
-    return 1 + (selection_bytes - 1) / piece_size;
-}
-
 }
 
 StreamDemandPlan build_stream_demand_plan(
     std::vector<StreamDemand> demands,
-    const std::uint64_t selection_bytes,
-    const std::uint64_t critical_front_bytes
+    const StreamWindow& window
 ) {
     StreamDemandPlan result;
     if (demands.empty()) {
@@ -65,80 +34,94 @@ StreamDemandPlan build_stream_demand_plan(
         return left.id < right.id;
     });
 
-    std::map<std::uint32_t, PriorityClass> combined;
-    std::map<std::uint64_t, std::vector<PiecePriority>> blocking_schedules;
-    for (const auto& demand : demands) {
-        auto schedule = schedule_for(demand, 0, 0);
-        merge_schedule(combined, schedule);
-        blocking_schedules.insert_or_assign(demand.id, std::move(schedule));
-    }
-
-    std::set<std::uint32_t> ordered_blockers;
-    for (auto demand = demands.rbegin(); demand != demands.rend(); ++demand) {
-        const auto schedule = blocking_schedules.find(demand->id);
-        if (schedule == blocking_schedules.end()) {
-            continue;
-        }
-        for (const auto& priority : schedule->second) {
-            if (priority.priority == PriorityClass::blocking &&
-                ordered_blockers.insert(priority.piece).second) {
-                result.blocking_deadline_order.push_back(priority.piece);
-            }
-        }
-    }
-
     const auto& focused = demands.back();
     result.focused_demand_id = focused.id;
-    const auto focused_schedule = blocking_schedules.find(focused.id);
-    std::set<std::uint32_t> focused_blockers;
-    if (focused_schedule != blocking_schedules.end()) {
-        for (const auto& priority : focused_schedule->second) {
+    result.cold = focused.kind == DemandKind::prefetch || focused.cold;
+    const auto critical_bytes = result.cold
+        ? std::uint64_t{0}
+        : std::min(
+              window.critical_bytes,
+              static_cast<std::uint64_t>(window.critical_piece_limit) * focused.piece_size
+          );
+    auto focused_schedule = build_piece_schedule({
+        focused.file_offset,
+        focused.file_size,
+        focused.piece_size,
+        focused.range,
+        critical_bytes,
+        window.playback_bytes,
+        window.readahead_bytes,
+        window.tail_bytes,
+    });
+    if (focused.kind != DemandKind::reader) {
+        for (auto& priority : focused_schedule) {
             if (priority.priority == PriorityClass::blocking) {
-                focused_blockers.insert(priority.piece);
+                priority.priority = PriorityClass::critical;
             }
         }
     }
 
-    const auto budget_pieces = physical_piece_budget(selection_bytes, focused.piece_size);
-    const auto target_pieces = std::max(
-        budget_pieces,
-        static_cast<std::uint64_t>(combined.size())
+    std::map<std::uint32_t, PriorityClass> combined;
+    merge_schedule(combined, focused_schedule);
+    const auto index_bytes = std::min(
+        std::max(window.tail_bytes, focused.file_size / 64),
+        focused.file_size
     );
-    std::set<std::uint32_t> critical_pieces;
-    const auto lookahead = rolling_lookahead(
-        focused.range,
-        std::numeric_limits<std::uint64_t>::max(),
-        critical_front_bytes
-    );
-    for (const auto& priority : schedule_for(focused, lookahead.critical_bytes, 0)) {
-        if (priority.priority == PriorityClass::critical) {
-            critical_pieces.insert(priority.piece);
+    if (window.tail_bytes > 0 && focused.range.start >= focused.file_size - index_bytes) {
+        const auto head_bytes = std::min(
+            critical_bytes + window.playback_bytes,
+            focused.file_size
+        );
+        if (head_bytes > 0) {
+            auto head = build_piece_schedule({
+                focused.file_offset,
+                focused.file_size,
+                focused.piece_size,
+                http::ByteRange{0, head_bytes - 1},
+                0,
+                0,
+                0,
+                0,
+            });
+            for (auto& priority : head) {
+                priority.priority = PriorityClass::playback;
+            }
+            merge_schedule(combined, head);
         }
     }
-    if (!focused_blockers.empty() && focused.file_size > 0 &&
-        focused.piece_size > 0 &&
-        focused.file_offset <= std::numeric_limits<std::uint64_t>::max() -
-            (focused.file_size - 1)) {
-        const auto last_file_piece =
-            (focused.file_offset + focused.file_size - 1) / focused.piece_size;
-        const auto focused_piece = static_cast<std::uint64_t>(*focused_blockers.rbegin());
-        for (auto candidate = focused_piece + 1;
-             candidate <= last_file_piece &&
-                 static_cast<std::uint64_t>(combined.size()) < target_pieces;
-             ++candidate) {
-            if (candidate > std::numeric_limits<std::uint32_t>::max()) {
-                break;
+
+    std::set<std::uint32_t> ordered;
+    for (const auto& priority : focused_schedule) {
+        if (priority.priority == PriorityClass::blocking &&
+            ordered.insert(priority.piece).second) {
+            result.deadline_order.push_back(priority.piece);
+        }
+    }
+    for (auto demand = std::next(demands.rbegin()); demand != demands.rend(); ++demand) {
+        if (demand->kind != DemandKind::reader) {
+            continue;
+        }
+        const auto schedule = build_piece_schedule({
+            demand->file_offset,
+            demand->file_size,
+            demand->piece_size,
+            demand->range,
+            0,
+            0,
+            0,
+            0,
+        });
+        merge_schedule(combined, schedule);
+        for (const auto& priority : schedule) {
+            if (priority.priority == PriorityClass::blocking &&
+                ordered.insert(priority.piece).second) {
+                result.deadline_order.push_back(priority.piece);
             }
-            const auto piece = static_cast<std::uint32_t>(candidate);
-            if (combined.contains(piece)) {
-                continue;
-            }
-            combined.emplace(
-                piece,
-                critical_pieces.contains(piece)
-                    ? PriorityClass::critical
-                    : PriorityClass::playback
-            );
+        }
+    }
+    for (const auto& [piece, priority] : combined) {
+        if (priority == PriorityClass::critical && ordered.insert(piece).second) {
+            result.deadline_order.push_back(piece);
         }
     }
 

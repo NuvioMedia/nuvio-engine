@@ -32,8 +32,19 @@ EngineRuntime::EngineRuntime(
       event_capacity_(event_capacity) {
     stats_.struct_size = sizeof(nuvio_engine_stats);
     if (backend_) {
+        backend_->set_wakeup([this] {
+            wake();
+        });
         worker_ = std::thread(&EngineRuntime::run, this);
     }
+}
+
+void EngineRuntime::wake() {
+    {
+        std::lock_guard lock(command_mutex_);
+        wake_pending_ = true;
+    }
+    command_ready_.notify_one();
 }
 
 EngineRuntime::~EngineRuntime() {
@@ -217,8 +228,9 @@ void EngineRuntime::run() {
         {
             std::unique_lock lock(command_mutex_);
             command_ready_.wait_for(lock, std::chrono::milliseconds(25), [this] {
-                return stopping_ || !commands_.empty();
+                return stopping_ || wake_pending_ || !commands_.empty();
             });
+            wake_pending_ = false;
             if (!commands_.empty()) {
                 command = std::move(commands_.front());
                 commands_.pop_front();
@@ -299,9 +311,19 @@ void EngineRuntime::collect_backend_events() {
     if (!backend_) {
         return;
     }
-    for (auto& event : backend_->pop_events()) {
+    auto events = backend_->pop_events();
+    const auto now = std::chrono::steady_clock::now();
+    if (events.empty() && now < next_stats_refresh_) {
+        return;
+    }
+    next_stats_refresh_ = now + std::chrono::milliseconds(50);
+    refresh_stats();
+    for (auto& event : events) {
         push_event(std::move(event));
     }
+}
+
+void EngineRuntime::refresh_stats() {
     const auto backend_stats = backend_->statistics();
     nuvio_engine_stats stats{};
     stats.struct_size = sizeof(nuvio_engine_stats);

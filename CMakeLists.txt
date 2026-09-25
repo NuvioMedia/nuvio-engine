@@ -44,6 +44,7 @@ target_sources(
         src/scheduler/stream_demand_plan.cpp
         src/security/random_bytes.cpp
         src/storage/atomic_file.cpp
+        src/storage/payload_reader.cpp
         src/torrent/file_selection.cpp
 )
 

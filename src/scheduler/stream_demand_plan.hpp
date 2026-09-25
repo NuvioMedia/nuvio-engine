@@ -9,24 +9,40 @@
 
 namespace nuvio::scheduler {
 
+enum class DemandKind : std::uint8_t {
+    reader,
+    anchor,
+    prefetch,
+};
+
 struct StreamDemand {
     std::uint64_t id;
     std::uint64_t file_offset;
     std::uint64_t file_size;
     std::uint32_t piece_size;
     http::ByteRange range;
+    DemandKind kind = DemandKind::reader;
+    bool cold = false;
+};
+
+struct StreamWindow {
+    std::uint64_t critical_bytes;
+    std::uint32_t critical_piece_limit;
+    std::uint64_t playback_bytes;
+    std::uint64_t readahead_bytes;
+    std::uint64_t tail_bytes;
 };
 
 struct StreamDemandPlan {
     std::uint64_t focused_demand_id = 0;
     std::vector<PiecePriority> pieces;
-    std::vector<std::uint32_t> blocking_deadline_order;
+    std::vector<std::uint32_t> deadline_order;
+    bool cold = false;
 };
 
 [[nodiscard]] StreamDemandPlan build_stream_demand_plan(
     std::vector<StreamDemand> demands,
-    std::uint64_t selection_bytes,
-    std::uint64_t critical_front_bytes
+    const StreamWindow& window
 );
 
 }

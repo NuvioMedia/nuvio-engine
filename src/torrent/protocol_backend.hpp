@@ -2,6 +2,7 @@
 #define NUVIO_ENGINE_PROTOCOL_BACKEND_HPP
 
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -166,6 +167,8 @@ public:
         std::uint64_t target_bytes
     ) = 0;
     virtual void shutdown() = 0;
+    virtual void set_wakeup(std::function<void()>) {
+    }
     [[nodiscard]] virtual std::vector<BackendEvent> pop_events() = 0;
     [[nodiscard]] virtual BackendStats statistics() = 0;
 };

@@ -82,29 +82,6 @@ http::ByteRange blocking_demand_range(
     };
 }
 
-RollingLookahead rolling_lookahead(
-    const http::ByteRange blocking_range,
-    const std::uint64_t selection_bytes,
-    const std::uint64_t critical_front_bytes
-) {
-    if (blocking_range.start > blocking_range.end) {
-        throw std::invalid_argument("blocking range must be valid");
-    }
-    const auto span = blocking_range.end - blocking_range.start;
-    const auto blocking_bytes = span == std::numeric_limits<std::uint64_t>::max()
-        ? span
-        : span + 1;
-    if (blocking_bytes >= selection_bytes) {
-        return {};
-    }
-    const auto remaining = selection_bytes - blocking_bytes;
-    const auto uncovered_critical = critical_front_bytes > blocking_bytes
-        ? critical_front_bytes - blocking_bytes
-        : 0;
-    const auto critical = std::min(uncovered_critical, remaining);
-    return {critical, remaining - critical};
-}
-
 std::vector<PiecePriority> build_piece_schedule(const ScheduleRequest& request) {
     if (request.piece_size == 0) {
         throw std::invalid_argument("piece size must be greater than zero");

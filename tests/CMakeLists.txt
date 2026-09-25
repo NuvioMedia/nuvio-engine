@@ -9,6 +9,8 @@ add_executable(
     ${PROJECT_SOURCE_DIR}/src/http/loopback_server.cpp
     atomic_file_test.cpp
     ${PROJECT_SOURCE_DIR}/src/storage/atomic_file.cpp
+    payload_reader_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/storage/payload_reader.cpp
     verified_piece_cache_test.cpp
     ${PROJECT_SOURCE_DIR}/src/cache/verified_piece_cache.cpp
     disk_cache_manager_test.cpp
