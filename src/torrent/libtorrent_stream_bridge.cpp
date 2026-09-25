@@ -275,6 +275,7 @@ struct LibtorrentStreamBridge::Impl {
         std::uint64_t focused_demand_id = 0;
         std::uint64_t revision = 0;
         bool cold = false;
+        std::map<std::uint32_t, int> first_blocks;
     };
 
     struct DemandGuard {
@@ -1036,6 +1037,14 @@ struct LibtorrentStreamBridge::Impl {
                     : scheduler::DemandKind::anchor,
             });
         }
+        std::map<std::uint32_t, int> first_blocks;
+        for (const auto& demand : demands) {
+            const auto absolute = demand.file_offset + demand.range.start;
+            first_blocks.insert_or_assign(
+                static_cast<std::uint32_t>(absolute / demand.piece_size),
+                static_cast<int>((absolute % demand.piece_size) / block_bytes)
+            );
+        }
         scheduler::StreamDemandPlan plan;
         try {
             plan = scheduler::build_stream_demand_plan(std::move(demands), window);
@@ -1126,6 +1135,9 @@ struct LibtorrentStreamBridge::Impl {
         const auto in_next = [&](const std::uint32_t piece) {
             return std::ranges::find(next_deadlines, piece) != next_deadlines.end();
         };
+        const auto in_previous = [&](const std::uint32_t piece) {
+            return std::ranges::find(previous_deadlines, piece) != previous_deadlines.end();
+        };
         const auto reset_deadline = [&](const std::uint32_t piece) {
             try {
                 handle->reset_piece_deadline(lt::piece_index_t(static_cast<int>(piece)));
@@ -1175,6 +1187,30 @@ struct LibtorrentStreamBridge::Impl {
                 }
             }
         }
+        std::map<std::uint32_t, int> applied_first_blocks;
+        for (const auto piece : next_deadlines) {
+            const auto wanted = first_blocks.find(piece);
+            const auto block = wanted == first_blocks.end() ? 0 : wanted->second;
+            const auto previous_block = [&] {
+                if (jumped || previous == current_schedules.end()) {
+                    return 0;
+                }
+                const auto found = previous->second.first_blocks.find(piece);
+                return found == previous->second.first_blocks.end() ? 0 : found->second;
+            }();
+            if (block != previous_block || (block > 0 && !in_previous(piece))) {
+                try {
+                    handle->set_piece_first_block(
+                        lt::piece_index_t(static_cast<int>(piece)),
+                        block
+                    );
+                } catch (...) {
+                }
+            }
+            if (block > 0) {
+                applied_first_blocks.emplace(piece, block);
+            }
+        }
 
         if (combined.empty()) {
             current_schedules.erase(id);
@@ -1196,6 +1232,7 @@ struct LibtorrentStreamBridge::Impl {
                     plan.focused_demand_id,
                     revision,
                     plan.cold,
+                    std::move(applied_first_blocks),
                 }
             );
         }
