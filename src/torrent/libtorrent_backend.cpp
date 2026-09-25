@@ -102,7 +102,7 @@ int bounded_rate(const std::uint64_t value) {
 lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     lt::settings_pack settings;
     const auto profile = torrent_profile_settings(config.torrent_profile);
-    settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.1");
+    settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.2");
     settings.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:0,[::]:0");
     settings.set_bool(lt::settings_pack::enable_dht, true);
     settings.set_bool(lt::settings_pack::enable_lsd, true);
