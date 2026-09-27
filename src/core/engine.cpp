@@ -149,7 +149,7 @@ std::uint32_t nuvio_engine_api_version() {
 }
 
 const char* nuvio_engine_version_string() {
-    return "0.1.2";
+    return "0.1.3";
 }
 
 const char* nuvio_engine_protocol_backend_version() {
