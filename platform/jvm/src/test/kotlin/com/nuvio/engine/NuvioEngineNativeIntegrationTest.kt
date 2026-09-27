@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class NuvioEngineNativeIntegrationTest {
     @Test
-    fun packagedLibraryStreamsSeededTorrentAcrossItsFullLifecycle() = runBlocking {
+    fun packagedLibraryStreamsSeededTorrentAcrossItsFullLifecycle() = runBlocking<Unit> {
         val libraryPath = System.getProperty("nuvio.engine.testLibrary").orEmpty()
         assumeTrue(libraryPath.isNotBlank(), "nuvio.engine.testLibrary was not provided")
         val library = File(libraryPath)
@@ -134,7 +134,7 @@ class NuvioEngineNativeIntegrationTest {
     }
 
     @Test
-    fun protectedDiskCachePressureRemainsNonfatalThroughJvmBinding() = runBlocking {
+    fun protectedDiskCachePressureRemainsNonfatalThroughJvmBinding() = runBlocking<Unit> {
         val libraryPath = System.getProperty("nuvio.engine.testLibrary").orEmpty()
         assumeTrue(libraryPath.isNotBlank(), "nuvio.engine.testLibrary was not provided")
         val library = File(libraryPath)

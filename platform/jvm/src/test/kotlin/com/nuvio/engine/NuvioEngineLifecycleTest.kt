@@ -180,6 +180,33 @@ class NuvioEngineLifecycleTest {
     }
 
     @Test
+    fun stopAndRemoveReturnTheirCompletionEvents() = runTest {
+        val api = FakeNuvioNativeApi()
+        val engine = createEngine(api)
+        try {
+            val stop = async { engine.stopStream(streamId) }
+            runCurrent()
+            api.enqueue(nativeEvent(type = 6, requestId = 1, torrentId = torrentId, streamId = streamId))
+            advanceTimeBy(20)
+            runCurrent()
+            val stopped = stop.await()
+            assertEquals(NuvioEventType.StreamStopped, stopped.type)
+            assertEquals(streamId, stopped.streamId)
+
+            val remove = async { engine.removeTorrent(torrentId) }
+            runCurrent()
+            api.enqueue(nativeEvent(type = 5, requestId = 2, torrentId = torrentId))
+            advanceTimeBy(20)
+            runCurrent()
+            val removed = remove.await()
+            assertEquals(NuvioEventType.TorrentRemoved, removed.type)
+            assertEquals(torrentId, removed.torrentId)
+        } finally {
+            engine.close()
+        }
+    }
+
+    @Test
     fun invalidInputsNeverReachNativeCode() = runTest {
         val api = FakeNuvioNativeApi()
         val engine = createEngine(api)

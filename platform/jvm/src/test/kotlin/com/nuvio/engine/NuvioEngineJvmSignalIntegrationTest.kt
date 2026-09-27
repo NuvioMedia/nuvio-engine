@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class NuvioEngineJvmSignalIntegrationTest {
     @Test
-    fun largeTorrentReadsPreserveJvmSafepoints() = runBlocking {
+    fun largeTorrentReadsPreserveJvmSafepoints() = runBlocking<Unit> {
         val libraryPath = System.getProperty("nuvio.engine.testLibrary").orEmpty()
         assumeTrue(libraryPath.isNotBlank(), "nuvio.engine.testLibrary was not provided")
         val library = File(libraryPath)

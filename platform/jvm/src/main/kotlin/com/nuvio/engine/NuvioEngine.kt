@@ -217,16 +217,16 @@ public class NuvioEngine private constructor(
         throw NuvioEngineException(-1, "verified preload target was not reflected in stream stats")
     }
 
-    public suspend fun stopStream(streamId: String) {
+    public suspend fun stopStream(streamId: String): NuvioEvent {
         validateStreamId(streamId)
-        awaitCommand(NuvioEventType.StreamStopped) { handle ->
+        return awaitCommand(NuvioEventType.StreamStopped) { handle ->
             nativeApi.stopStream(handle, streamId)
         }
     }
 
-    public suspend fun removeTorrent(torrentId: String) {
+    public suspend fun removeTorrent(torrentId: String): NuvioEvent {
         validateTorrentId(torrentId)
-        awaitCommand(NuvioEventType.TorrentRemoved) { handle ->
+        return awaitCommand(NuvioEventType.TorrentRemoved) { handle ->
             nativeApi.removeTorrent(handle, torrentId)
         }
     }
