@@ -138,6 +138,51 @@ NUVIO_TEST("disk cache supports an immediate reclaim target below its normal cap
     NUVIO_EXPECT_TRUE(!stats.over_budget);
 }
 
+NUVIO_TEST("disk cache measurement reports usage without evicting") {
+    DiskCacheFixture fixture;
+    fixture.put(first_id, "1234");
+    fixture.put(second_id, "5678");
+    nuvio::cache::DiskCacheManager cache(fixture.root(), 4);
+
+    const auto stats = cache.measure({second_id});
+
+    NUVIO_EXPECT_TRUE(std::filesystem::exists(fixture.root() / first_id));
+    NUVIO_EXPECT_TRUE(std::filesystem::exists(fixture.root() / second_id));
+    NUVIO_EXPECT_EQ(stats.used_bytes, std::uint64_t(8));
+    NUVIO_EXPECT_EQ(stats.protected_bytes, std::uint64_t(4));
+    NUVIO_EXPECT_EQ(stats.evictions, std::uint64_t(0));
+    NUVIO_EXPECT_TRUE(stats.over_budget);
+}
+
+NUVIO_TEST("disk cache measurement rescans protected torrents and reuses inactive sizes") {
+    DiskCacheFixture fixture;
+    fixture.put(first_id, "1234");
+    fixture.put(second_id, "5678");
+    nuvio::cache::DiskCacheManager cache(fixture.root(), 100);
+    static_cast<void>(cache.enforce({}));
+    fixture.put(first_id, "12345678");
+    fixture.put(second_id, "12345678");
+
+    const auto stats = cache.measure({second_id});
+
+    NUVIO_EXPECT_EQ(stats.used_bytes, std::uint64_t(12));
+    NUVIO_EXPECT_EQ(stats.protected_bytes, std::uint64_t(8));
+}
+
+NUVIO_TEST("disk cache measurement drops payload trees that disappeared") {
+    DiskCacheFixture fixture;
+    fixture.put(first_id, "1234");
+    fixture.put(second_id, "5678");
+    nuvio::cache::DiskCacheManager cache(fixture.root(), 100);
+    NUVIO_EXPECT_EQ(cache.measure({}).used_bytes, std::uint64_t(8));
+    std::filesystem::remove_all(fixture.root() / second_id);
+
+    const auto stats = cache.measure({});
+
+    NUVIO_EXPECT_EQ(stats.used_bytes, std::uint64_t(4));
+    NUVIO_EXPECT_EQ(stats.protected_bytes, std::uint64_t(0));
+}
+
 NUVIO_TEST("disk cache scan never follows a hash-shaped symlink") {
     DiskCacheFixture fixture;
     const auto outside = fixture.outside();

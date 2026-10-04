@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace nuvio::cache {
@@ -29,11 +30,15 @@ public:
         const std::unordered_set<std::string>& protected_torrents,
         std::uint64_t target_bytes
     );
+    [[nodiscard]] DiskCacheStats measure(
+        const std::unordered_set<std::string>& protected_torrents
+    );
     [[nodiscard]] const DiskCacheStats& stats() const;
 
 private:
     std::filesystem::path payload_root_;
     DiskCacheStats stats_;
+    std::unordered_map<std::string, std::uint64_t> measured_sizes_;
 };
 
 }

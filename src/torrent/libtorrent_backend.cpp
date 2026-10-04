@@ -1220,6 +1220,22 @@ private:
         }
     }
 
+    void measure_disk_cache(
+        const std::chrono::steady_clock::time_point now,
+        std::vector<BackendEvent>& events
+    ) {
+        if (now < next_disk_cache_measurement_) {
+            return;
+        }
+        next_disk_cache_measurement_ = now + std::chrono::seconds(5);
+        try {
+            static_cast<void>(disk_cache_.measure(protected_torrents()));
+            last_disk_cache_error_.clear();
+        } catch (const std::exception& error) {
+            report_disk_cache_error(error.what(), events);
+        }
+    }
+
     void run_disk_cache_enforcement(std::vector<BackendEvent>& events) {
         if (shutting_down_) {
             return;
@@ -1231,6 +1247,7 @@ private:
         const auto stream = stream_bridge_->statistics();
         if (stream.active_http_requests > 0 || stream.active_demands > 0) {
             next_disk_cache_check_ = now + std::chrono::seconds(1);
+            measure_disk_cache(now, events);
             return;
         }
         next_disk_cache_check_ = now + std::chrono::seconds(30);
@@ -1751,6 +1768,7 @@ private:
     std::chrono::steady_clock::time_point next_warm_check_{};
     std::chrono::steady_clock::time_point next_disk_cache_check_ =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    std::chrono::steady_clock::time_point next_disk_cache_measurement_{};
     std::string last_disk_cache_error_;
     bool shutting_down_ = false;
     lt::session session_;
