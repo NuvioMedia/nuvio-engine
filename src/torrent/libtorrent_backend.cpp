@@ -560,6 +560,8 @@ public:
                 handle_tracker_error(*tracker_error);
             } else if (const auto* dht = lt::alert_cast<lt::dht_reply_alert>(alert)) {
                 handle_dht_reply(*dht);
+            } else if (lt::alert_cast<lt::dht_bootstrap_alert>(alert)) {
+                announce_to_dht();
             }
         }
         run_periodic_checkpoints(events);
@@ -1469,6 +1471,15 @@ private:
         if (found != telemetry_.end() &&
             found->second.tracker_error_events != std::numeric_limits<std::uint32_t>::max()) {
             ++found->second.tracker_error_events;
+        }
+    }
+
+    void announce_to_dht() {
+        for (const auto& [id, handle] : handles_) {
+            static_cast<void>(id);
+            if (handle.is_valid()) {
+                handle.force_dht_announce();
+            }
         }
     }
 
