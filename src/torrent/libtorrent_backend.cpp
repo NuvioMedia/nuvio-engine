@@ -48,6 +48,8 @@ constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
 constexpr int request_queue_seconds = 1;
 constexpr int maximum_outstanding_requests_per_peer = 64;
+constexpr int idle_session_tick_milliseconds = 500;
+constexpr int streaming_session_tick_milliseconds = 100;
 
 struct TorrentProfileSettings {
     int connection_limit;
@@ -62,11 +64,11 @@ TorrentProfileSettings torrent_profile_settings(
     case NUVIO_ENGINE_TORRENT_PROFILE_SOFT:
         return {35, 35, 35};
     case NUVIO_ENGINE_TORRENT_PROFILE_BALANCED:
-        return {55, 55, 55};
-    case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
         return {120, 120, 120};
+    case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
+        return {200, 200, 200};
     }
-    return {55, 55, 55};
+    return {120, 120, 120};
 }
 
 enum class MetadataSource {
@@ -122,6 +124,7 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_int(lt::settings_pack::torrent_connect_boost, profile.connect_boost);
     settings.set_int(lt::settings_pack::request_timeout, piece_request_timeout_seconds);
     settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
+    settings.set_int(lt::settings_pack::tick_interval, idle_session_tick_milliseconds);
     settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
     settings.set_int(
         lt::settings_pack::max_out_request_queue,
@@ -560,6 +563,9 @@ public:
                 handle_tracker_error(*tracker_error);
             } else if (const auto* dht = lt::alert_cast<lt::dht_reply_alert>(alert)) {
                 handle_dht_reply(*dht);
+            } else if (lt::alert_cast<lt::dht_bootstrap_alert>(alert)) {
+                dht_ready_ = true;
+                announce_to_dht();
             }
         }
         run_periodic_checkpoints(events);
@@ -567,6 +573,7 @@ public:
         process_disk_reclaims(events);
         run_disk_cache_enforcement(events);
         request_telemetry_update();
+        update_session_tick();
         return events;
     }
 
@@ -1472,6 +1479,34 @@ private:
         }
     }
 
+    void update_session_tick() {
+        if (shutting_down_) {
+            return;
+        }
+        const auto streaming = std::ranges::any_of(handles_, [&](const auto& entry) {
+            return stream_bridge_->has_stream_for_torrent(entry.first);
+        });
+        if (streaming == fast_session_tick_) {
+            return;
+        }
+        lt::settings_pack settings;
+        settings.set_int(
+            lt::settings_pack::tick_interval,
+            streaming ? streaming_session_tick_milliseconds : idle_session_tick_milliseconds
+        );
+        session_.apply_settings(std::move(settings));
+        fast_session_tick_ = streaming;
+    }
+
+    void announce_to_dht() {
+        for (const auto& [id, handle] : handles_) {
+            static_cast<void>(id);
+            if (handle.is_valid()) {
+                handle.force_dht_announce();
+            }
+        }
+    }
+
     void handle_dht_reply(const lt::dht_reply_alert& alert) {
         const auto id = torrent_id(alert.handle);
         const auto found = telemetry_.find(id);
@@ -1570,6 +1605,9 @@ private:
         const auto id = torrent_id(alert.handle);
         handles_.insert_or_assign(id, alert.handle);
         telemetry_.try_emplace(id);
+        if (dht_ready_) {
+            alert.handle.force_dht_announce();
+        }
         bool discard_pending_context = false;
         if (context != nullptr) {
             context->torrent_id = id;
@@ -1771,6 +1809,8 @@ private:
     std::chrono::steady_clock::time_point next_disk_cache_measurement_{};
     std::string last_disk_cache_error_;
     bool shutting_down_ = false;
+    bool dht_ready_ = false;
+    bool fast_session_tick_ = false;
     lt::session session_;
     std::unique_ptr<LibtorrentStreamBridge> stream_bridge_;
 };
