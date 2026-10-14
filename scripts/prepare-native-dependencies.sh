@@ -89,6 +89,10 @@ patched_file_states=(
     'src/settings_pack.cpp:059759d20da14fc8ada6177df77562addda1a033ef6fe08edf631f757dfd9bf4:7e938dba3b5d3d0184b1446e6c8e82406d1196f241cc60414ca6224bec682a10'
     'src/torrent.cpp:d0b8d64c54583cb9287d20aaf5ea5bc2e85cbf0caa5d5c9df42f40c77187d185:7bfc67cc542e10773989f41e7c910840d1823d88eaa6f34d9c79cfcf8ebc30a1'
     'src/torrent_handle.cpp:9f8c985b4bff1fbf160fa8a68a4e808eb9a60caf10b853c1b29d08bea7fcb5fe:65925b73cfd51c8ff1d459dea306acbb9aed1960a0bc277affdf28bb24ed6bf4'
+    'src/ut_metadata.cpp:aaea791fac2c0ec3caed5b2f153650ef41c7342a4e13b43f28970a87160ca48c:1661e97d9821ecb8676d930dd43db1ded330459335d9244c57f13fc3c7cffe88'
+)
+late_patched_files=(
+    src/ut_metadata.cpp
 )
 legacy_patched_hashes=(
     'src/piece_picker.cpp:7d7229f55a051d9d785053341a05000a1caa4f4bdf2d36e703716a4e501999ae'
@@ -105,6 +109,9 @@ for specification in "${patched_file_states[@]}"; do
     patched_hash=${hashes#*:}
     actual_hash=$(file_sha256 "$libtorrent_source/$file")
     if [[ "$actual_hash" == "$original_hash" ]]; then
+        if [[ " ${late_patched_files[*]} " == *" $file "* ]]; then
+            continue
+        fi
         file_state=original
     elif [[ "$actual_hash" == "$patched_hash" ]]; then
         file_state=patched
