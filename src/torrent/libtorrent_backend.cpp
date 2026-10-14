@@ -48,7 +48,8 @@ constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
 constexpr int request_queue_seconds = 1;
 constexpr int maximum_outstanding_requests_per_peer = 64;
-constexpr int session_tick_milliseconds = 100;
+constexpr int idle_session_tick_milliseconds = 500;
+constexpr int streaming_session_tick_milliseconds = 100;
 
 struct TorrentProfileSettings {
     int connection_limit;
@@ -123,7 +124,7 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_int(lt::settings_pack::torrent_connect_boost, profile.connect_boost);
     settings.set_int(lt::settings_pack::request_timeout, piece_request_timeout_seconds);
     settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
-    settings.set_int(lt::settings_pack::tick_interval, session_tick_milliseconds);
+    settings.set_int(lt::settings_pack::tick_interval, idle_session_tick_milliseconds);
     settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
     settings.set_int(
         lt::settings_pack::max_out_request_queue,
@@ -572,6 +573,7 @@ public:
         process_disk_reclaims(events);
         run_disk_cache_enforcement(events);
         request_telemetry_update();
+        update_session_tick();
         return events;
     }
 
@@ -1477,6 +1479,25 @@ private:
         }
     }
 
+    void update_session_tick() {
+        if (shutting_down_) {
+            return;
+        }
+        const auto streaming = std::ranges::any_of(handles_, [&](const auto& entry) {
+            return stream_bridge_->has_stream_for_torrent(entry.first);
+        });
+        if (streaming == fast_session_tick_) {
+            return;
+        }
+        lt::settings_pack settings;
+        settings.set_int(
+            lt::settings_pack::tick_interval,
+            streaming ? streaming_session_tick_milliseconds : idle_session_tick_milliseconds
+        );
+        session_.apply_settings(std::move(settings));
+        fast_session_tick_ = streaming;
+    }
+
     void announce_to_dht() {
         for (const auto& [id, handle] : handles_) {
             static_cast<void>(id);
@@ -1789,6 +1810,7 @@ private:
     std::string last_disk_cache_error_;
     bool shutting_down_ = false;
     bool dht_ready_ = false;
+    bool fast_session_tick_ = false;
     lt::session session_;
     std::unique_ptr<LibtorrentStreamBridge> stream_bridge_;
 };
