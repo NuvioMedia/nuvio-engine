@@ -87,12 +87,13 @@ patched_file_states=(
     'src/piece_picker.cpp:d82140e1d9c4b3ba4a93a4ad7106c015d8a83e0f325b519acadc019cd29e7a6c:7d7229f55a051d9d785053341a05000a1caa4f4bdf2d36e703716a4e501999ae'
     'src/session_impl.cpp:e33778939a03634f7ca588752f924afcdf790ac48ddd2a127af71e00f34d1c65:e9e7716829023651072714fa26e39f19326df8d3ec7104a82b7288abb6cb044c'
     'src/settings_pack.cpp:059759d20da14fc8ada6177df77562addda1a033ef6fe08edf631f757dfd9bf4:7e938dba3b5d3d0184b1446e6c8e82406d1196f241cc60414ca6224bec682a10'
-    'src/torrent.cpp:d0b8d64c54583cb9287d20aaf5ea5bc2e85cbf0caa5d5c9df42f40c77187d185:47f9596d17153e8527871f3cb7172948e7aa879c576de3722876afd0ab0def04'
+    'src/torrent.cpp:d0b8d64c54583cb9287d20aaf5ea5bc2e85cbf0caa5d5c9df42f40c77187d185:7bfc67cc542e10773989f41e7c910840d1823d88eaa6f34d9c79cfcf8ebc30a1'
     'src/torrent_handle.cpp:9f8c985b4bff1fbf160fa8a68a4e808eb9a60caf10b853c1b29d08bea7fcb5fe:65925b73cfd51c8ff1d459dea306acbb9aed1960a0bc277affdf28bb24ed6bf4'
 )
-legacy_session_impl_hashes=(
-    1d25c8d56d7342db5be0e5cf147955ca97542f52d490203fe6408a6acc15d702
-    23a77b31941aca6090f79517ede37bb96b1cf6af1b9834d616bcfff1da5bfd37
+legacy_patched_hashes=(
+    'src/session_impl.cpp:1d25c8d56d7342db5be0e5cf147955ca97542f52d490203fe6408a6acc15d702'
+    'src/session_impl.cpp:23a77b31941aca6090f79517ede37bb96b1cf6af1b9834d616bcfff1da5bfd37'
+    'src/torrent.cpp:47f9596d17153e8527871f3cb7172948e7aa879c576de3722876afd0ab0def04'
 )
 source_state=
 expected_modified_files=
@@ -107,10 +108,10 @@ for specification in "${patched_file_states[@]}"; do
     elif [[ "$actual_hash" == "$patched_hash" ]]; then
         file_state=patched
         expected_modified_files+="$file"$'\n'
-    elif [[ "$file" == src/session_impl.cpp ]]; then
+    else
         file_state=
-        for legacy_hash in "${legacy_session_impl_hashes[@]}"; do
-            if [[ "$actual_hash" == "$legacy_hash" ]]; then
+        for legacy_state in "${legacy_patched_hashes[@]}"; do
+            if [[ "$legacy_state" == "$file:$actual_hash" ]]; then
                 file_state=patched
                 expected_modified_files+="$file"$'\n'
                 break
@@ -120,9 +121,6 @@ for specification in "${patched_file_states[@]}"; do
             echo "libtorrent source has an unexpected change in $file" >&2
             exit 1
         fi
-    else
-        echo "libtorrent source has an unexpected change in $file" >&2
-        exit 1
     fi
     if [[ -n "$source_state" && "$source_state" != "$file_state" ]]; then
         echo "libtorrent source is only partially patched" >&2
