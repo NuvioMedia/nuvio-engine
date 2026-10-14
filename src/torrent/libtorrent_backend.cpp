@@ -561,6 +561,7 @@ public:
             } else if (const auto* dht = lt::alert_cast<lt::dht_reply_alert>(alert)) {
                 handle_dht_reply(*dht);
             } else if (lt::alert_cast<lt::dht_bootstrap_alert>(alert)) {
+                dht_ready_ = true;
                 announce_to_dht();
             }
         }
@@ -1581,6 +1582,9 @@ private:
         const auto id = torrent_id(alert.handle);
         handles_.insert_or_assign(id, alert.handle);
         telemetry_.try_emplace(id);
+        if (dht_ready_) {
+            alert.handle.force_dht_announce();
+        }
         bool discard_pending_context = false;
         if (context != nullptr) {
             context->torrent_id = id;
@@ -1782,6 +1786,7 @@ private:
     std::chrono::steady_clock::time_point next_disk_cache_measurement_{};
     std::string last_disk_cache_error_;
     bool shutting_down_ = false;
+    bool dht_ready_ = false;
     lt::session session_;
     std::unique_ptr<LibtorrentStreamBridge> stream_bridge_;
 };
