@@ -48,6 +48,7 @@ constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
 constexpr int request_queue_seconds = 1;
 constexpr int maximum_outstanding_requests_per_peer = 64;
+constexpr int session_tick_milliseconds = 100;
 
 struct TorrentProfileSettings {
     int connection_limit;
@@ -122,6 +123,7 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_int(lt::settings_pack::torrent_connect_boost, profile.connect_boost);
     settings.set_int(lt::settings_pack::request_timeout, piece_request_timeout_seconds);
     settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
+    settings.set_int(lt::settings_pack::tick_interval, session_tick_milliseconds);
     settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
     settings.set_int(
         lt::settings_pack::max_out_request_queue,
