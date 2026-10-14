@@ -65,7 +65,7 @@ val prepareAndroidLicenseResources = tasks.register<Sync>("prepareAndroidLicense
 }
 
 group = "com.nuvio"
-version = "0.1.4"
+version = "0.1.5"
 
 extensions.configure<LibraryExtension> {
     namespace = "com.nuvio.engine"
