@@ -62,11 +62,11 @@ TorrentProfileSettings torrent_profile_settings(
     case NUVIO_ENGINE_TORRENT_PROFILE_SOFT:
         return {35, 35, 35};
     case NUVIO_ENGINE_TORRENT_PROFILE_BALANCED:
-        return {55, 55, 55};
-    case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
         return {120, 120, 120};
+    case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
+        return {200, 200, 200};
     }
-    return {55, 55, 55};
+    return {120, 120, 120};
 }
 
 enum class MetadataSource {
