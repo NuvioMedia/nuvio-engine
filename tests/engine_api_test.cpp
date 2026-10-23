@@ -1769,6 +1769,110 @@ NUVIO_TEST("prepared stream URL serves verified full and partial torrent bytes")
     nuvio_engine_destroy(engine);
 }
 
+NUVIO_TEST("torrent errors after metadata are reported without a request id") {
+    EngineTestDirectories directories;
+    constexpr std::string_view seeded_torrent_id =
+        "13ade5f13f4e7ce4021a3cc82f72e504b9ef35ac";
+    const auto payload_directory =
+        directories.root() / "cache" / "payload" / seeded_torrent_id;
+    {
+        std::filesystem::create_directories(payload_directory);
+        std::ofstream payload(payload_directory / "test.bin", std::ios::binary);
+        payload << "test";
+    }
+    std::string torrent =
+        "d4:infod6:lengthi4e4:name8:test.bin12:piece lengthi16384e6:pieces20:";
+    constexpr std::array<unsigned char, 20> piece_hash{
+        0xa9, 0x4a, 0x8f, 0xe5, 0xcc, 0xb1, 0x9b, 0xa6, 0x1c, 0x4c,
+        0x08, 0x73, 0xd3, 0x91, 0xe9, 0x87, 0x98, 0x2f, 0xbb, 0xd3,
+    };
+    torrent.append(
+        reinterpret_cast<const char*>(piece_hash.data()),
+        piece_hash.size()
+    );
+    torrent += "ee";
+
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+
+    nuvio_engine_torrent_request add_request;
+    nuvio_engine_torrent_request_init(&add_request);
+    add_request.source_type = NUVIO_ENGINE_TORRENT_SOURCE_DATA;
+    add_request.torrent_data = reinterpret_cast<const std::uint8_t*>(torrent.data());
+    add_request.torrent_data_size = torrent.size();
+    std::uint64_t add_request_id = 0;
+    NUVIO_EXPECT_EQ(
+        nuvio_engine_add_torrent(engine, &add_request, &add_request_id),
+        NUVIO_ENGINE_STATUS_OK
+    );
+
+    nuvio_engine_event event;
+    nuvio_engine_event_init(&event);
+    std::string torrent_id;
+    for (int attempt = 0; attempt < 200 && torrent_id.empty(); ++attempt) {
+        const auto status = nuvio_engine_poll_event(engine, &event);
+        if (status == NUVIO_ENGINE_STATUS_NO_EVENT) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        NUVIO_EXPECT_EQ(status, NUVIO_ENGINE_STATUS_OK);
+        if (event.type == NUVIO_ENGINE_EVENT_TORRENT_METADATA_READY &&
+            event.request_id == add_request_id) {
+            torrent_id = event.torrent_id;
+        }
+    }
+    NUVIO_EXPECT_EQ(torrent_id, std::string(seeded_torrent_id));
+
+    nuvio_engine_stream_request stream_request;
+    nuvio_engine_stream_request_init(&stream_request);
+    stream_request.torrent_id = torrent_id.c_str();
+    stream_request.file_index = 0;
+    std::uint64_t prepare_request_id = 0;
+    NUVIO_EXPECT_EQ(
+        nuvio_engine_prepare_stream(engine, &stream_request, &prepare_request_id),
+        NUVIO_ENGINE_STATUS_OK
+    );
+    std::string stream_url;
+    for (int attempt = 0; attempt < 200 && stream_url.empty(); ++attempt) {
+        const auto status = nuvio_engine_poll_event(engine, &event);
+        if (status == NUVIO_ENGINE_STATUS_NO_EVENT) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        NUVIO_EXPECT_EQ(status, NUVIO_ENGINE_STATUS_OK);
+        if (event.type == NUVIO_ENGINE_EVENT_STREAM_PREPARED &&
+            event.request_id == prepare_request_id) {
+            stream_url = event.stream_url;
+        }
+    }
+    NUVIO_EXPECT_TRUE(!stream_url.empty());
+
+    std::filesystem::remove(payload_directory / "test.bin");
+    const auto local = parse_local_stream_url(stream_url);
+    static_cast<void>(nuvio::test::send_http_request(
+        local.port,
+        "GET " + local.target + " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    ));
+
+    bool received_error = false;
+    for (int attempt = 0; attempt < 500 && !received_error; ++attempt) {
+        const auto status = nuvio_engine_poll_event(engine, &event);
+        if (status == NUVIO_ENGINE_STATUS_NO_EVENT) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        NUVIO_EXPECT_EQ(status, NUVIO_ENGINE_STATUS_OK);
+        received_error = event.type == NUVIO_ENGINE_EVENT_TORRENT_ERROR &&
+            std::string(event.torrent_id) == torrent_id;
+    }
+    NUVIO_EXPECT_TRUE(received_error);
+    NUVIO_EXPECT_EQ(event.request_id, std::uint64_t(0));
+    nuvio_engine_destroy(engine);
+}
+
 NUVIO_TEST("concurrent distant HTTP ranges remain blocking until disconnect") {
     EngineTestDirectories directories;
     constexpr std::uint64_t file_size = 64ULL * 1024ULL * 1024ULL;

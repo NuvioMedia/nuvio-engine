@@ -1014,7 +1014,7 @@ private:
             events.push_back({
                 BackendEventType::torrent_error,
                 0,
-                id,
+                {},
                 std::string("failed to persist torrent state: ") + error.what(),
                 {},
             });
@@ -1046,7 +1046,7 @@ private:
         events.push_back({
             BackendEventType::torrent_error,
             0,
-            id,
+            {},
             std::string("failed to create torrent state: ") + alert.error.message(),
             {},
         });
@@ -1662,7 +1662,7 @@ private:
         auto* context = alert.handle.userdata().get<RequestContext>();
         events.push_back({
             BackendEventType::torrent_error,
-            context == nullptr ? 0 : context->request_id,
+            context == nullptr || context->metadata_emitted ? 0 : context->request_id,
             torrent_id(alert.handle),
             alert.error.message(),
             {},
@@ -1715,6 +1715,16 @@ private:
         const auto id = torrent_id(alert.handle);
         const auto pending = pending_prepares_.find(id);
         if (pending == pending_prepares_.end()) {
+            if (alert.error == boost::system::errc::no_space_on_device &&
+                stream_bridge_->has_stream_for_torrent(id)) {
+                events.push_back({
+                    BackendEventType::torrent_error,
+                    0,
+                    id,
+                    alert.error.message(),
+                    {},
+                });
+            }
             return;
         }
         events.push_back({
