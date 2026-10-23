@@ -25,6 +25,8 @@ add_executable(
     ${PROJECT_SOURCE_DIR}/src/scheduler/piece_scheduler.cpp
     stream_demand_plan_test.cpp
     ${PROJECT_SOURCE_DIR}/src/scheduler/stream_demand_plan.cpp
+    retention_plan_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/scheduler/retention_plan.cpp
     random_bytes_test.cpp
     ${PROJECT_SOURCE_DIR}/src/security/random_bytes.cpp
 )

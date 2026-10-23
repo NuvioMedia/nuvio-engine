@@ -4,9 +4,11 @@
 #include "http/loopback_server.hpp"
 #include "nuvio_engine/piece_scheduler.hpp"
 #include "scheduler/demand_window.hpp"
+#include "scheduler/retention_plan.hpp"
 #include "scheduler/stream_demand_plan.hpp"
 #include "security/random_bytes.hpp"
 #include "storage/payload_reader.hpp"
+#include "storage/range_release.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/download_priority.hpp>
 #include <libtorrent/hex.hpp>
@@ -50,6 +53,27 @@ constexpr std::uint64_t minimum_readahead_bytes = 64 * 1024 * 1024;
 constexpr std::uint64_t maximum_readahead_bytes = 256 * 1024 * 1024;
 constexpr std::uint64_t metadata_tail_bytes = 2 * 1024 * 1024;
 constexpr std::uint64_t block_bytes = 16 * 1024;
+constexpr std::uint64_t retained_behind_bytes = 64 * 1024 * 1024;
+constexpr std::uint64_t retained_edge_bytes = 8 * 1024 * 1024;
+constexpr std::uint64_t retention_hysteresis_bytes = 32 * 1024 * 1024;
+constexpr std::uint64_t free_space_reserve_bytes = 512 * 1024 * 1024;
+constexpr std::size_t maximum_evictions_per_check = 1024;
+constexpr std::chrono::seconds retention_check_interval{1};
+constexpr std::chrono::milliseconds range_release_interval{250};
+constexpr std::chrono::seconds range_release_grace{1};
+constexpr std::chrono::seconds resume_save_retry_interval{2};
+
+std::uint64_t saturating_sum(const std::uint64_t left, const std::uint64_t right) {
+    return right > std::numeric_limits<std::uint64_t>::max() - left
+        ? std::numeric_limits<std::uint64_t>::max()
+        : left + right;
+}
+
+std::uint64_t saturating_product(const std::uint64_t left, const std::uint64_t right) {
+    return left != 0 && right > std::numeric_limits<std::uint64_t>::max() / left
+        ? std::numeric_limits<std::uint64_t>::max()
+        : left * right;
+}
 
 std::uint64_t readahead_for_disk_budget(const std::uint64_t disk_capacity_bytes) {
     return std::clamp(
@@ -278,6 +302,20 @@ struct LibtorrentStreamBridge::Impl {
         std::map<std::uint32_t, int> first_blocks;
     };
 
+    struct EvictedPiece {
+        std::uint32_t piece = 0;
+        std::chrono::steady_clock::time_point evicted_at{};
+        bool persisted = false;
+    };
+
+    struct TorrentRetention {
+        lt::torrent_handle handle;
+        std::filesystem::path save_path;
+        std::vector<EvictedPiece> evicted;
+        std::chrono::steady_clock::time_point next_save_request{};
+        bool release_supported = true;
+    };
+
     struct DemandGuard {
         Impl* owner;
         std::uint64_t demand_id;
@@ -316,6 +354,7 @@ struct LibtorrentStreamBridge::Impl {
               readahead_for_disk_budget(disk_capacity_bytes) - playback_window_bytes,
               metadata_tail_bytes,
           },
+          disk_capacity(disk_capacity_bytes),
           inactivity_timeout(inactivity),
           piece_cache(memory_capacity_bytes),
           server(std::make_unique<http::LoopbackServer>(
@@ -728,6 +767,8 @@ struct LibtorrentStreamBridge::Impl {
         }
         reissue_stalled_reads();
         expire_inactive_streams();
+        enforce_retention();
+        release_evicted_ranges();
     }
 
     void reissue_stalled_reads() {
@@ -1313,6 +1354,8 @@ struct LibtorrentStreamBridge::Impl {
     void remove_torrent(const std::string& id) {
         revoked_torrents.insert(id);
         anchors.erase(id);
+        retention.erase(id);
+        resume_save_requests.erase(id);
         piece_cache.erase_torrent(id);
         last_ready_pieces.erase(id);
         std::erase_if(requested_reads, [&](const auto& entry) {
@@ -1508,6 +1551,320 @@ struct LibtorrentStreamBridge::Impl {
         return result;
     }
 
+    TorrentRetention& retention_state(const StreamRoute& route) {
+        auto found = retention.find(route.torrent_id);
+        if (found == retention.end()) {
+            TorrentRetention state;
+            state.handle = route.handle;
+            state.save_path = std::filesystem::path(
+                route.handle.status(lt::torrent_handle::query_save_path).save_path
+            );
+            found = retention.emplace(route.torrent_id, std::move(state)).first;
+        }
+        return found->second;
+    }
+
+    std::unordered_set<std::uint32_t> retention_protected_pieces(const std::string& id) const {
+        std::unordered_set<std::uint32_t> result;
+        if (const auto schedule = current_schedules.find(id);
+            schedule != current_schedules.end()) {
+            for (const auto& [piece, priority] : schedule->second.priorities) {
+                static_cast<void>(priority);
+                result.insert(piece);
+            }
+            result.insert(
+                schedule->second.deadline_order.begin(),
+                schedule->second.deadline_order.end()
+            );
+        }
+        for (const auto& [key, waiters] : piece_waiters) {
+            static_cast<void>(waiters);
+            if (key.torrent_id == id) {
+                result.insert(key.piece);
+            }
+        }
+        for (const auto& [key, requested] : requested_reads) {
+            static_cast<void>(requested);
+            if (key.torrent_id == id) {
+                result.insert(key.piece);
+            }
+        }
+        for (const auto& [key, blocks] : partial_blocks) {
+            static_cast<void>(blocks);
+            if (key.torrent_id == id) {
+                result.insert(key.piece);
+            }
+        }
+        return result;
+    }
+
+    bool range_release_available(const std::filesystem::path& directory) {
+        if (!range_release_supported.has_value()) {
+            range_release_supported = storage::supports_range_release(directory);
+        }
+        return *range_release_supported;
+    }
+
+    std::uint64_t retention_budget(
+        const std::filesystem::path& save_path,
+        const std::uint64_t retained_bytes,
+        const std::uint64_t evicting_bytes
+    ) const {
+        const auto minimum = saturating_sum(
+            saturating_sum(window.playback_bytes, window.readahead_bytes),
+            saturating_sum(retained_behind_bytes, 2 * retained_edge_bytes)
+        );
+        auto budget = std::max(disk_capacity, minimum);
+        std::error_code error;
+        const auto space = std::filesystem::space(save_path, error);
+        if (!error) {
+            const auto usable = saturating_sum(
+                saturating_sum(retained_bytes, evicting_bytes),
+                static_cast<std::uint64_t>(space.available)
+            );
+            const auto allowed = usable > free_space_reserve_bytes
+                ? usable - free_space_reserve_bytes
+                : std::uint64_t{0};
+            budget = std::max(minimum, std::min(budget, allowed));
+        }
+        return budget;
+    }
+
+    void enforce_retention() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_retention_check) {
+            return;
+        }
+        next_retention_check = now + retention_check_interval;
+        std::vector<StreamRoute> streams;
+        {
+            std::lock_guard lock(routes_mutex);
+            streams.reserve(routes.size());
+            for (const auto& [target, route] : routes) {
+                static_cast<void>(target);
+                streams.push_back(route);
+            }
+        }
+        for (const auto& route : streams) {
+            if (revoked_torrents.contains(route.torrent_id)) {
+                continue;
+            }
+            try {
+                enforce_retention(route, now);
+            } catch (...) {
+            }
+        }
+    }
+
+    void enforce_retention(
+        const StreamRoute& route,
+        const std::chrono::steady_clock::time_point now
+    ) {
+        const auto anchor = anchors.find(route.torrent_id);
+        if (anchor == anchors.end() || route.piece_size == 0 || !route.handle.is_valid() ||
+            !route.handle.in_session()) {
+            return;
+        }
+        const auto metadata = route.handle.torrent_file();
+        if (!metadata) {
+            return;
+        }
+        auto& state = retention_state(route);
+        if (!state.release_supported) {
+            return;
+        }
+        std::unordered_set<std::uint32_t> evicting;
+        for (const auto& evicted : state.evicted) {
+            evicting.insert(evicted.piece);
+        }
+        const auto status = route.handle.status(lt::torrent_handle::query_pieces);
+        std::vector<std::uint32_t> retained;
+        for (int piece = 0; piece < metadata->num_pieces(); ++piece) {
+            const auto have = status.is_seeding ||
+                (piece < status.pieces.size() && status.pieces[lt::piece_index_t(piece)]);
+            const auto index = static_cast<std::uint32_t>(piece);
+            if (have && !evicting.contains(index)) {
+                retained.push_back(index);
+            }
+        }
+        const std::uint64_t piece_bytes = route.piece_size;
+        const auto retained_bytes = saturating_product(retained.size(), piece_bytes);
+        const auto budget = retention_budget(
+            state.save_path,
+            retained_bytes,
+            saturating_product(evicting.size(), piece_bytes)
+        );
+        if (retained_bytes <= budget) {
+            return;
+        }
+        const auto target = budget > retention_hysteresis_bytes
+            ? budget - retention_hysteresis_bytes
+            : std::uint64_t{0};
+        const auto evictions = scheduler::plan_retention_evictions(
+            {
+                route.file_offset,
+                route.file_size,
+                route.piece_size,
+                anchor->second.range.start,
+                retained_behind_bytes,
+                saturating_sum(window.playback_bytes, window.readahead_bytes),
+                retained_edge_bytes,
+                target,
+            },
+            retained,
+            retention_protected_pieces(route.torrent_id),
+            maximum_evictions_per_check
+        );
+        if (evictions.empty()) {
+            return;
+        }
+        if (!range_release_available(state.save_path.parent_path())) {
+            state.release_supported = false;
+            return;
+        }
+        std::vector<lt::piece_index_t> indices;
+        indices.reserve(evictions.size());
+        for (const auto piece : evictions) {
+            indices.emplace_back(static_cast<int>(piece));
+            state.evicted.push_back({piece, now, false});
+        }
+        route.handle.nuvio_evict_pieces(indices);
+        resume_save_requests.insert(route.torrent_id);
+        state.next_save_request = now + resume_save_retry_interval;
+    }
+
+    void release_evicted_ranges() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_range_release) {
+            return;
+        }
+        next_range_release = now + range_release_interval;
+        for (auto& [id, state] : retention) {
+            if (state.evicted.empty()) {
+                continue;
+            }
+            try {
+                release_evicted_ranges(id, state, now);
+            } catch (...) {
+                state.evicted.clear();
+            }
+        }
+    }
+
+    void release_evicted_ranges(
+        const std::string& id,
+        TorrentRetention& state,
+        const std::chrono::steady_clock::time_point now
+    ) {
+        const auto ready = [&](const EvictedPiece& evicted) {
+            return evicted.persisted && now - evicted.evicted_at >= range_release_grace;
+        };
+        if (std::ranges::none_of(state.evicted, ready)) {
+            const auto unpersisted = std::ranges::any_of(
+                state.evicted,
+                [](const EvictedPiece& evicted) { return !evicted.persisted; }
+            );
+            if (unpersisted && now >= state.next_save_request) {
+                resume_save_requests.insert(id);
+                state.next_save_request = now + resume_save_retry_interval;
+            }
+            return;
+        }
+        const auto metadata = state.handle.torrent_file();
+        if (!metadata) {
+            state.evicted.clear();
+            return;
+        }
+        const auto status = state.handle.status(lt::torrent_handle::query_pieces);
+        const auto priorities = state.handle.get_piece_priorities();
+        std::vector<lt::partial_piece_info> queue;
+        state.handle.get_download_queue(queue);
+        std::unordered_set<std::uint32_t> partial;
+        for (const auto& entry : queue) {
+            partial.insert(static_cast<std::uint32_t>(static_cast<int>(entry.piece_index)));
+        }
+        const auto busy = retention_protected_pieces(id);
+        const auto& files = metadata->files();
+        std::vector<EvictedPiece> remaining;
+        for (const auto& evicted : state.evicted) {
+            if (!ready(evicted)) {
+                remaining.push_back(evicted);
+                continue;
+            }
+            const auto piece = static_cast<int>(evicted.piece);
+            const auto index = lt::piece_index_t(piece);
+            if (status.is_seeding || (piece < status.pieces.size() && status.pieces[index])) {
+                continue;
+            }
+            const auto wanted = evicted.piece < priorities.size() &&
+                priorities[evicted.piece] != lt::dont_download;
+            if (wanted || busy.contains(evicted.piece) || partial.contains(evicted.piece)) {
+                remaining.push_back(evicted);
+                continue;
+            }
+            if (!state.release_supported) {
+                continue;
+            }
+            for (const auto& slice : metadata->map_block(index, 0, metadata->piece_size(index))) {
+                if (files.pad_file_at(slice.file_index) || slice.offset < 0 || slice.size <= 0) {
+                    continue;
+                }
+                const auto released = storage::release_file_range(
+                    std::filesystem::path(files.file_path(
+                        slice.file_index,
+                        state.save_path.string()
+                    )),
+                    static_cast<std::uint64_t>(slice.offset),
+                    static_cast<std::uint64_t>(slice.size)
+                );
+                if (released == storage::RangeRelease::unsupported) {
+                    state.release_supported = false;
+                    break;
+                }
+            }
+        }
+        state.evicted = std::move(remaining);
+    }
+
+    void handle_resume_saved(const std::string& id, const lt::add_torrent_params& params) {
+        const auto found = retention.find(id);
+        if (found == retention.end() || found->second.evicted.empty()) {
+            return;
+        }
+        int piece_count = 0;
+        try {
+            if (const auto metadata = found->second.handle.torrent_file()) {
+                piece_count = metadata->num_pieces();
+            }
+        } catch (...) {
+        }
+        if (piece_count <= 0) {
+            return;
+        }
+        const auto& have = params.have_pieces;
+        const auto trusted = have.size() >= piece_count;
+        for (auto& evicted : found->second.evicted) {
+            const auto piece = static_cast<int>(evicted.piece);
+            if (!trusted || piece >= have.size() || !have[lt::piece_index_t(piece)]) {
+                evicted.persisted = true;
+            }
+        }
+    }
+
+    bool has_unpersisted_evictions(const std::string& id) const {
+        const auto found = retention.find(id);
+        return found != retention.end() &&
+            std::ranges::any_of(found->second.evicted, [](const EvictedPiece& evicted) {
+                return !evicted.persisted;
+            });
+    }
+
+    std::vector<std::string> pop_resume_save_requests() {
+        std::vector<std::string> result(resume_save_requests.begin(), resume_save_requests.end());
+        resume_save_requests.clear();
+        return result;
+    }
+
     StreamBridgeStats statistics() {
         StreamBridgeStats result{};
         {
@@ -1568,6 +1925,8 @@ struct LibtorrentStreamBridge::Impl {
         requested_reads.clear();
         partial_blocks.clear();
         anchors.clear();
+        retention.clear();
+        resume_save_requests.clear();
         last_ready_pieces.clear();
         piece_cache.clear();
         for (auto& [id, demand] : active_demands) {
@@ -1586,6 +1945,7 @@ struct LibtorrentStreamBridge::Impl {
     }
 
     const scheduler::StreamWindow window;
+    const std::uint64_t disk_capacity;
     const std::chrono::milliseconds inactivity_timeout;
     std::mutex routes_mutex;
     std::unordered_map<std::string, StreamRoute> routes;
@@ -1609,6 +1969,11 @@ struct LibtorrentStreamBridge::Impl {
     std::vector<StoppedStream> expired_streams;
     std::chrono::steady_clock::time_point next_inactivity_check{};
     cache::VerifiedPieceCache piece_cache;
+    std::unordered_map<std::string, TorrentRetention> retention;
+    std::unordered_set<std::string> resume_save_requests;
+    std::chrono::steady_clock::time_point next_retention_check{};
+    std::chrono::steady_clock::time_point next_range_release{};
+    std::optional<bool> range_release_supported;
     std::atomic_bool shutting_down = false;
     std::unique_ptr<http::LoopbackServer> server;
 
@@ -1685,6 +2050,21 @@ std::vector<std::uint32_t> LibtorrentStreamBridge::blocking_pieces(
 
 void LibtorrentStreamBridge::remove_torrent(const std::string& torrent_id) {
     impl_->remove_torrent(torrent_id);
+}
+
+void LibtorrentStreamBridge::handle_resume_saved(
+    const std::string& torrent_id,
+    const lt::add_torrent_params& params
+) {
+    impl_->handle_resume_saved(torrent_id, params);
+}
+
+bool LibtorrentStreamBridge::has_unpersisted_evictions(const std::string& torrent_id) const {
+    return impl_->has_unpersisted_evictions(torrent_id);
+}
+
+std::vector<std::string> LibtorrentStreamBridge::pop_resume_save_requests() {
+    return impl_->pop_resume_save_requests();
 }
 
 StreamBridgeStats LibtorrentStreamBridge::statistics() {
