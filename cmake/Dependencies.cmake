@@ -73,6 +73,7 @@ function(nuvio_engine_add_libtorrent)
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-top-priority-first.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-metadata-pipeline.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-urgent-hedge.patch"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-evict-pieces.patch"
     )
     set(
         nuvio_libtorrent_patch_files
@@ -87,6 +88,7 @@ function(nuvio_engine_add_libtorrent)
         "src/torrent.cpp"
         "src/piece_picker.cpp"
         "src/ut_metadata.cpp"
+        "src/torrent.cpp"
         "src/torrent.cpp"
     )
     set(
@@ -103,6 +105,7 @@ function(nuvio_engine_add_libtorrent)
         "nuvio_top"
         "nuvio_metadata_pipeline"
         "nuvio_hedge_blocks"
+        "nuvio_evict_pieces"
     )
     list(LENGTH nuvio_libtorrent_patches nuvio_libtorrent_patch_count)
     math(EXPR nuvio_libtorrent_last_patch "${nuvio_libtorrent_patch_count} - 1")

@@ -11,6 +11,8 @@ add_executable(
     ${PROJECT_SOURCE_DIR}/src/storage/atomic_file.cpp
     payload_reader_test.cpp
     ${PROJECT_SOURCE_DIR}/src/storage/payload_reader.cpp
+    range_release_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/storage/range_release.cpp
     verified_piece_cache_test.cpp
     ${PROJECT_SOURCE_DIR}/src/cache/verified_piece_cache.cpp
     disk_cache_manager_test.cpp
@@ -23,6 +25,8 @@ add_executable(
     ${PROJECT_SOURCE_DIR}/src/scheduler/piece_scheduler.cpp
     stream_demand_plan_test.cpp
     ${PROJECT_SOURCE_DIR}/src/scheduler/stream_demand_plan.cpp
+    retention_plan_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/scheduler/retention_plan.cpp
     random_bytes_test.cpp
     ${PROJECT_SOURCE_DIR}/src/security/random_bytes.cpp
 )

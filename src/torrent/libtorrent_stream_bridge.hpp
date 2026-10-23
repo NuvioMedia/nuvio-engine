@@ -65,6 +65,12 @@ public:
         const std::string& torrent_id
     ) const;
     void remove_torrent(const std::string& torrent_id);
+    void handle_resume_saved(
+        const std::string& torrent_id,
+        const lt::add_torrent_params& params
+    );
+    [[nodiscard]] bool has_unpersisted_evictions(const std::string& torrent_id) const;
+    [[nodiscard]] std::vector<std::string> pop_resume_save_requests();
     [[nodiscard]] StreamBridgeStats statistics();
     void shutdown();
 

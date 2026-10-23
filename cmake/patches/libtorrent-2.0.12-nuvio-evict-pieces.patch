@@ -1,0 +1,61 @@
+diff --git a/include/libtorrent/torrent.hpp b/include/libtorrent/torrent.hpp
+--- a/include/libtorrent/torrent.hpp
++++ b/include/libtorrent/torrent.hpp
+@@ -650,0 +651 @@
++		void nuvio_evict_pieces(std::vector<piece_index_t> const& pieces);
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -5428,0 +5429,38 @@
++	void torrent::nuvio_evict_pieces(std::vector<piece_index_t> const& pieces)
++	{
++		if (!valid_metadata() || m_abort || pieces.empty()) return;
++		if (m_state == torrent_status::checking_files
++			|| m_state == torrent_status::checking_resume_data)
++			return;
++		if (m_seed_mode) leave_seed_mode(seed_mode_t::skip_checking);
++		need_picker();
++		bool evicted = false;
++		for (auto const piece : pieces)
++		{
++			if (piece < piece_index_t(0) || piece >= m_torrent_file->end_piece()) continue;
++			if (!m_picker->have_piece(piece)) continue;
++			if (std::any_of(m_time_critical_pieces.begin(), m_time_critical_pieces.end()
++				, [piece](time_critical_piece const& p) { return p.piece == piece; }))
++				continue;
++			for (auto* p : m_connections)
++			{
++				TORRENT_INCREMENT(m_iterating_connections);
++				p->write_dont_have(piece);
++			}
++			m_picker->set_piece_priority(piece, dont_download);
++			m_picker->we_dont_have(piece);
++			evicted = true;
++		}
++		if (!evicted) return;
++		m_have_all = false;
++		m_file_progress.clear();
++		m_file_progress.init(picker(), m_torrent_file->files());
++		if (m_state == torrent_status::seeding) set_state(torrent_status::finished);
++		if (m_state == torrent_status::finished && !m_picker->is_finished()) resume_download();
++		update_gauge();
++		update_state_list();
++		update_want_tick();
++		set_need_save_resume(torrent_handle::if_download_progress);
++		state_updated();
++	}
++
+diff --git a/include/libtorrent/torrent_handle.hpp b/include/libtorrent/torrent_handle.hpp
+--- a/include/libtorrent/torrent_handle.hpp
++++ b/include/libtorrent/torrent_handle.hpp
+@@ -428,0 +429 @@
++		void nuvio_evict_pieces(std::vector<piece_index_t> const& pieces) const;
+diff --git a/src/torrent_handle.cpp b/src/torrent_handle.cpp
+--- a/src/torrent_handle.cpp
++++ b/src/torrent_handle.cpp
+@@ -953,0 +954,5 @@
++	void torrent_handle::nuvio_evict_pieces(std::vector<piece_index_t> const& pieces) const
++	{
++		async_call(&torrent::nuvio_evict_pieces, pieces);
++	}
++

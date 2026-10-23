@@ -491,6 +491,16 @@ public:
 
     std::vector<BackendEvent> pop_events() override {
         stream_bridge_->poll();
+        for (const auto& id : stream_bridge_->pop_resume_save_requests()) {
+            const auto torrent = handles_.find(id);
+            if (torrent != handles_.end() && !pending_removals_.contains(id)) {
+                request_resume_save(
+                    torrent->second,
+                    lt::torrent_handle::only_if_modified |
+                        lt::torrent_handle::save_info_dict
+                );
+            }
+        }
         for (auto& expired : stream_bridge_->pop_expired_streams()) {
             mark_warm(expired.torrent_id);
             const auto torrent = handles_.find(expired.torrent_id);
@@ -1010,14 +1020,16 @@ private:
                 throw std::runtime_error("torrent state exceeds configured size limit");
             }
             storage::write_file_atomically(resume_path(id), contents);
+            stream_bridge_->handle_resume_saved(id, alert.params);
         } catch (const std::exception& error) {
             events.push_back({
                 BackendEventType::torrent_error,
                 0,
-                id,
+                {},
                 std::string("failed to persist torrent state: ") + error.what(),
                 {},
             });
+            discard_stale_resume_state(id);
         }
         if (pending_cache_unloads_.contains(id)) {
             begin_cache_unload(id, alert.handle, events);
@@ -1046,10 +1058,21 @@ private:
         events.push_back({
             BackendEventType::torrent_error,
             0,
-            id,
+            {},
             std::string("failed to create torrent state: ") + alert.error.message(),
             {},
         });
+    }
+
+    void discard_stale_resume_state(const std::string& id) {
+        if (!stream_bridge_->has_unpersisted_evictions(id)) {
+            return;
+        }
+        try {
+            storage::remove_file_if_present(resume_path(id));
+            stream_bridge_->handle_resume_saved(id, lt::add_torrent_params{});
+        } catch (...) {
+        }
     }
 
     void save_session_state() {
@@ -1662,7 +1685,7 @@ private:
         auto* context = alert.handle.userdata().get<RequestContext>();
         events.push_back({
             BackendEventType::torrent_error,
-            context == nullptr ? 0 : context->request_id,
+            context == nullptr || context->metadata_emitted ? 0 : context->request_id,
             torrent_id(alert.handle),
             alert.error.message(),
             {},
@@ -1715,6 +1738,16 @@ private:
         const auto id = torrent_id(alert.handle);
         const auto pending = pending_prepares_.find(id);
         if (pending == pending_prepares_.end()) {
+            if (alert.error == boost::system::errc::no_space_on_device &&
+                stream_bridge_->has_stream_for_torrent(id)) {
+                events.push_back({
+                    BackendEventType::torrent_error,
+                    0,
+                    id,
+                    alert.error.message(),
+                    {},
+                });
+            }
             return;
         }
         events.push_back({

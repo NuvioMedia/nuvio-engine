@@ -41,10 +41,12 @@ target_sources(
         src/http/http_protocol.cpp
         src/http/loopback_server.cpp
         src/scheduler/piece_scheduler.cpp
+        src/scheduler/retention_plan.cpp
         src/scheduler/stream_demand_plan.cpp
         src/security/random_bytes.cpp
         src/storage/atomic_file.cpp
         src/storage/payload_reader.cpp
+        src/storage/range_release.cpp
         src/torrent/file_selection.cpp
 )
 
