@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ios_deployment_target=16.1
+ios_deployment_target=15.0
 macos_deployment_target=11.0
 
 script_directory=$(cd "$(dirname "$0")" && pwd -P)

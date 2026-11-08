@@ -7,7 +7,7 @@ openssl_url="https://github.com/openssl/openssl/releases/download/openssl-${open
 text_template_version=1.61
 text_template_sha256=a295ea7d1ef241ae2640c1f7864b628f8e6f99ec14fb1da781b2f5f2168dcf09
 text_template_url="https://cpan.metacpan.org/authors/id/M/MS/MSCHOUT/Text-Template-${text_template_version}.tar.gz"
-ios_deployment_target=16.1
+ios_deployment_target=15.0
 macos_deployment_target=11.0
 runtime_prefix=/nuvio-engine/openssl
 

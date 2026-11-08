@@ -6,7 +6,7 @@ let package = Package(
     name: "NuvioEngine",
     platforms: [
         .macOS(.v11),
-        .iOS("16.1"),
+        .iOS("15.0"),
     ],
     products: [
         .library(name: "NuvioEngine", targets: ["NuvioEngine"]),
