@@ -19,6 +19,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <libtorrent/alert.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/client_data.hpp>
@@ -48,6 +52,18 @@ constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
 constexpr int request_queue_seconds = 1;
 constexpr int maximum_outstanding_requests_per_peer = 64;
+// iOS blocks multicast (LSD) and the UPnP SSDP probe without the multicast
+// networking entitlement; they only produce failed sends there. NAT-PMP is
+// unicast and stays enabled.
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+constexpr bool multicast_discovery_enabled = false;
+#else
+constexpr bool multicast_discovery_enabled = true;
+#endif
+// Appended to libtorrent's default bootstrap node as additional backups.
+constexpr const char* dht_bootstrap_node_list =
+    "dht.libtorrent.org:25401,router.bittorrent.com:6881,"
+    "router.utorrent.com:6881,dht.transmissionbt.com:6881";
 constexpr int idle_session_tick_milliseconds = 500;
 constexpr int streaming_session_tick_milliseconds = 100;
 constexpr std::chrono::minutes session_checkpoint_interval{5};
@@ -111,8 +127,14 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.6");
     settings.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:0,[::]:0");
     settings.set_bool(lt::settings_pack::enable_dht, true);
-    settings.set_bool(lt::settings_pack::enable_lsd, true);
-    settings.set_bool(lt::settings_pack::enable_upnp, true);
+    // Read-only (BEP 43): we answer no DHT queries, which saves battery and
+    // traffic on mobile. In libtorrent 2.0.12 the flag only stops incoming
+    // queries from being handled and marks outgoing ones with "ro"; get_peers
+    // lookups and announce_peer for our own torrents are unaffected.
+    settings.set_bool(lt::settings_pack::dht_read_only, true);
+    settings.set_str(lt::settings_pack::dht_bootstrap_nodes, dht_bootstrap_node_list);
+    settings.set_bool(lt::settings_pack::enable_lsd, multicast_discovery_enabled);
+    settings.set_bool(lt::settings_pack::enable_upnp, multicast_discovery_enabled);
     settings.set_bool(lt::settings_pack::enable_natpmp, true);
     settings.set_bool(lt::settings_pack::announce_to_all_tiers, true);
     settings.set_bool(lt::settings_pack::announce_to_all_trackers, true);
