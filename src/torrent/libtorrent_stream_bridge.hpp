@@ -67,6 +67,10 @@ public:
     [[nodiscard]] std::string stop_stream(const std::string& stream_id);
     [[nodiscard]] bool has_stream_for_torrent(const std::string& torrent_id);
     [[nodiscard]] bool has_active_reader(const std::string& torrent_id) const;
+    // A non-bulk (playback) stream of the torrent is being actively read.
+    [[nodiscard]] bool has_playback_reader(const std::string& torrent_id);
+    // The torrent has live streams and every one of them is a bulk stream.
+    [[nodiscard]] bool has_bulk_streams_only(const std::string& torrent_id);
     [[nodiscard]] std::vector<std::uint32_t> blocking_pieces(
         const std::string& torrent_id
     ) const;

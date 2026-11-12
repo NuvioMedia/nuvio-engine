@@ -43,6 +43,7 @@ target_sources(
         src/scheduler/piece_scheduler.cpp
         src/scheduler/retention_plan.cpp
         src/scheduler/stream_demand_plan.cpp
+        src/scheduler/stream_throttle.cpp
         src/security/random_bytes.cpp
         src/storage/atomic_file.cpp
         src/storage/payload_reader.cpp

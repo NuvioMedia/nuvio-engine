@@ -1,6 +1,7 @@
 #include "torrent/protocol_backend.hpp"
 #include "torrent/libtorrent_stream_bridge.hpp"
 #include "cache/disk_cache_manager.hpp"
+#include "scheduler/stream_throttle.hpp"
 #include "storage/atomic_file.hpp"
 
 #include <algorithm>
@@ -71,6 +72,8 @@ constexpr int streaming_session_tick_milliseconds = 100;
 constexpr std::chrono::seconds session_checkpoint_interval{60};
 constexpr std::chrono::seconds peer_info_interval{3};
 constexpr int minimum_torrent_connections = 20;
+// Download limit of a bulk (download) torrent while a playback stream is read.
+constexpr int throttled_bulk_download_limit = 256 * 1024;
 constexpr std::chrono::minutes disk_cache_rescan_interval{5};
 
 // Connection attempts each hold a file descriptor while pending, so the attempt
@@ -1673,37 +1676,77 @@ private:
     // rebalances it slowly (peer turnover). While several torrents have a
     // stream, give each a fair share (never below 20). With one streaming
     // torrent the per-torrent cap is removed so it keeps the full session limit.
+    // While a playback stream is actively read, torrents that only serve bulk
+    // (download) streams are throttled to a small connection cap and download
+    // limit so they cannot starve it; torrents serving a playback reader are
+    // never throttled. Runs on every poll, so a stream that stops, expires or
+    // goes idle restores the bulk torrents within one tick.
     void update_connection_caps() {
         if (shutting_down_) {
             return;
         }
-        int streaming = 0;
+        std::vector<std::string> ids;
+        std::vector<scheduler::TorrentStreamLoad> loads;
+        ids.reserve(handles_.size());
+        loads.reserve(handles_.size());
         for (const auto& [id, handle] : handles_) {
-            if (handle.is_valid() && stream_bridge_->has_stream_for_torrent(id)) {
-                ++streaming;
+            if (!handle.is_valid()) {
+                continue;
             }
+            scheduler::TorrentStreamLoad load;
+            load.streaming = stream_bridge_->has_stream_for_torrent(id);
+            if (load.streaming) {
+                load.playback_reader = stream_bridge_->has_playback_reader(id);
+                load.bulk_only = stream_bridge_->has_bulk_streams_only(id);
+            }
+            ids.push_back(id);
+            loads.push_back(load);
         }
-        const auto cap = streaming <= 1
-            ? -1
-            : std::max(minimum_torrent_connections, connection_limit_ / streaming);
+        scheduler::ThrottlePolicy policy;
+        policy.connection_limit = connection_limit_;
+        policy.minimum_connections = minimum_torrent_connections;
+        policy.throttled_download_limit = throttled_bulk_download_limit;
+        const auto budgets = scheduler::plan_torrent_budgets(loads, policy);
         for (auto applied = applied_connection_caps_.begin();
              applied != applied_connection_caps_.end();) {
             applied = handles_.contains(applied->first)
                 ? std::next(applied)
                 : applied_connection_caps_.erase(applied);
         }
-        for (const auto& [id, handle] : handles_) {
-            if (!handle.is_valid()) {
-                continue;
+        for (auto applied = applied_download_limits_.begin();
+             applied != applied_download_limits_.end();) {
+            applied = handles_.contains(applied->first)
+                ? std::next(applied)
+                : applied_download_limits_.erase(applied);
+        }
+        for (std::size_t index = 0; index < ids.size(); ++index) {
+            const auto& id = ids[index];
+            const auto& handle = handles_.at(id);
+            // Both values are also stored in resume data, so the first pass over
+            // a handle always applies them (resetting anything persisted).
+            const auto cap = applied_connection_caps_.find(id);
+            if (cap == applied_connection_caps_.end() ||
+                cap->second != budgets[index].max_connections) {
+                try {
+                    handle.set_max_connections(budgets[index].max_connections);
+                    applied_connection_caps_.insert_or_assign(
+                        id,
+                        budgets[index].max_connections
+                    );
+                } catch (...) {
+                }
             }
-            const auto found = applied_connection_caps_.find(id);
-            if (found != applied_connection_caps_.end() && found->second == cap) {
-                continue;
-            }
-            try {
-                handle.set_max_connections(cap);
-                applied_connection_caps_.insert_or_assign(id, cap);
-            } catch (...) {
+            const auto limit = applied_download_limits_.find(id);
+            if (limit == applied_download_limits_.end() ||
+                limit->second != budgets[index].download_limit) {
+                try {
+                    handle.set_download_limit(budgets[index].download_limit);
+                    applied_download_limits_.insert_or_assign(
+                        id,
+                        budgets[index].download_limit
+                    );
+                } catch (...) {
+                }
             }
         }
     }
@@ -2027,6 +2070,7 @@ private:
     std::chrono::steady_clock::time_point last_telemetry_request_ =
         std::chrono::steady_clock::now() - std::chrono::seconds(1);
     std::unordered_map<std::string, int> applied_connection_caps_;
+    std::unordered_map<std::string, int> applied_download_limits_;
     std::optional<std::vector<char>> saved_session_state_;
     bool disk_cache_dirty_ = true;
     std::uint64_t seen_release_generation_ = 0;

@@ -59,6 +59,9 @@ constexpr std::uint64_t retention_hysteresis_bytes = 32 * 1024 * 1024;
 constexpr std::uint64_t free_space_reserve_bytes = 512 * 1024 * 1024;
 constexpr std::size_t maximum_evictions_per_check = 1024;
 constexpr std::chrono::seconds retention_check_interval{2};
+// A playback reader that has been served no bytes for this long (while its data
+// is available) is paused, not starved, and no longer throttles bulk downloads.
+constexpr std::chrono::seconds playback_idle_after{10};
 constexpr std::chrono::milliseconds range_release_interval{250};
 constexpr std::chrono::seconds range_release_grace{1};
 // Each resume save is an atomic write with fsync. Evictions only wait for the
@@ -164,6 +167,11 @@ int deadline_for(const std::size_t ordinal) {
 struct LibtorrentStreamBridge::Impl {
     struct StreamCounters {
         std::atomic_uint64_t delivered_bytes = 0;
+        // steady_clock ticks of the last delivery to the HTTP client (or of
+        // the stream's creation); tells a reader that stalled (paused player,
+        // full buffers) from one that is consuming data.
+        std::atomic_int64_t last_progress_ticks =
+            std::chrono::steady_clock::now().time_since_epoch().count();
     };
 
     struct StreamActivity {
@@ -222,6 +230,10 @@ struct LibtorrentStreamBridge::Impl {
         const std::shared_ptr<StreamCounters>& counters,
         const std::uint64_t bytes
     ) {
+        counters->last_progress_ticks.store(
+            std::chrono::steady_clock::now().time_since_epoch().count(),
+            std::memory_order_relaxed
+        );
         auto current = counters->delivered_bytes.load(std::memory_order_relaxed);
         while (true) {
             const auto next = bytes > std::numeric_limits<std::uint64_t>::max() - current
@@ -1078,11 +1090,58 @@ struct LibtorrentStreamBridge::Impl {
         }
     }
 
+    // True when the torrent has streams and all of them are bulk streams. A
+    // torrent that also serves a playback stream keeps its piece deadlines.
     bool torrent_is_bulk(const std::string& id) {
         std::lock_guard lock(routes_mutex);
-        return std::ranges::any_of(routes, [&](const auto& route) {
-            return route.second.torrent_id == id && route.second.bulk;
-        });
+        bool any = false;
+        for (const auto& [target, route] : routes) {
+            static_cast<void>(target);
+            if (route.torrent_id != id) {
+                continue;
+            }
+            if (!route.bulk) {
+                return false;
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    // True while a non-bulk stream of the torrent has an HTTP request that is
+    // either waiting for data or has been served bytes recently.
+    bool has_playback_reader(const std::string& id) {
+        std::vector<std::pair<std::string, std::shared_ptr<StreamCounters>>> playback;
+        {
+            std::lock_guard lock(routes_mutex);
+            for (const auto& [target, route] : routes) {
+                static_cast<void>(target);
+                if (route.torrent_id == id && !route.bulk) {
+                    playback.emplace_back(route.stream_id, route.counters);
+                }
+            }
+        }
+        if (playback.empty()) {
+            return false;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& [stream_id, counters] : playback) {
+            for (const auto& [demand_id, demand] : active_demands) {
+                static_cast<void>(demand_id);
+                if (demand.route.stream_id != stream_id) {
+                    continue;
+                }
+                const std::chrono::steady_clock::time_point progress{
+                    std::chrono::steady_clock::duration(
+                        counters->last_progress_ticks.load(std::memory_order_relaxed)
+                    )
+                };
+                if (demand.needs_data || now - progress < playback_idle_after) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Bulk streams set no piece deadlines, so nothing asks libtorrent for the
@@ -2196,6 +2255,14 @@ std::string LibtorrentStreamBridge::stop_stream(const std::string& stream_id) {
 
 bool LibtorrentStreamBridge::has_stream_for_torrent(const std::string& torrent_id) {
     return impl_->has_stream_for_torrent(torrent_id);
+}
+
+bool LibtorrentStreamBridge::has_playback_reader(const std::string& torrent_id) {
+    return impl_->has_playback_reader(torrent_id);
+}
+
+bool LibtorrentStreamBridge::has_bulk_streams_only(const std::string& torrent_id) {
+    return impl_->torrent_is_bulk(torrent_id);
 }
 
 bool LibtorrentStreamBridge::has_active_reader(const std::string& torrent_id) const {
