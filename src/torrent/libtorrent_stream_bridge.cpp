@@ -44,7 +44,7 @@ namespace nuvio::torrent {
 namespace {
 
 constexpr std::size_t maximum_http_commands = 4096;
-constexpr std::size_t stream_worker_count = 8;
+constexpr std::size_t stream_worker_count = 16;
 constexpr std::chrono::seconds piece_wait_timeout{60};
 constexpr std::uint64_t critical_window_bytes = 8 * 1024 * 1024;
 constexpr std::uint32_t critical_piece_limit = 16;
