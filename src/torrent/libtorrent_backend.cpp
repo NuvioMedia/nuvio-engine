@@ -79,6 +79,7 @@ struct TorrentProfileSettings {
     int connection_limit;
     int connection_attempts_per_second;
     int connect_boost;
+    int max_out_request_queue;
 };
 
 TorrentProfileSettings torrent_profile_settings(
@@ -86,13 +87,14 @@ TorrentProfileSettings torrent_profile_settings(
 ) {
     switch (profile) {
     case NUVIO_ENGINE_TORRENT_PROFILE_SOFT:
-        return {35, 20, 20};
+        return {35, 20, 20, maximum_outstanding_requests_per_peer};
     case NUVIO_ENGINE_TORRENT_PROFILE_BALANCED:
-        return {120, 30, 40};
+        return {120, 30, 40, maximum_outstanding_requests_per_peer};
     case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
-        return {200, 40, 60};
+        // Deeper per-peer pipelines for bulk throughput on fast links.
+        return {200, 40, 60, 128};
     }
-    return {120, 30, 40};
+    return {120, 30, 40, maximum_outstanding_requests_per_peer};
 }
 
 enum class MetadataSource {
@@ -156,10 +158,7 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
     settings.set_int(lt::settings_pack::tick_interval, idle_session_tick_milliseconds);
     settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
-    settings.set_int(
-        lt::settings_pack::max_out_request_queue,
-        maximum_outstanding_requests_per_peer
-    );
+    settings.set_int(lt::settings_pack::max_out_request_queue, profile.max_out_request_queue);
     settings.set_int(lt::settings_pack::whole_pieces_threshold, 0);
     if (!config.tls_ca_bundle_path.empty()) {
         settings.set_str(
