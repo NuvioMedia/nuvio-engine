@@ -58,10 +58,13 @@ constexpr std::uint64_t retained_edge_bytes = 8 * 1024 * 1024;
 constexpr std::uint64_t retention_hysteresis_bytes = 32 * 1024 * 1024;
 constexpr std::uint64_t free_space_reserve_bytes = 512 * 1024 * 1024;
 constexpr std::size_t maximum_evictions_per_check = 1024;
-constexpr std::chrono::seconds retention_check_interval{1};
+constexpr std::chrono::seconds retention_check_interval{2};
 constexpr std::chrono::milliseconds range_release_interval{250};
 constexpr std::chrono::seconds range_release_grace{1};
-constexpr std::chrono::seconds resume_save_retry_interval{2};
+// Each resume save is an atomic write with fsync. Evictions only wait for the
+// next save (holes are punched after it), so batch them instead of saving every
+// couple of seconds while streaming.
+constexpr std::chrono::seconds resume_save_retry_interval{12};
 
 std::uint64_t saturating_sum(const std::uint64_t left, const std::uint64_t right) {
     return right > std::numeric_limits<std::uint64_t>::max() - left
@@ -1812,8 +1815,10 @@ struct LibtorrentStreamBridge::Impl {
             state.evicted.push_back({piece, now, false});
         }
         route.handle.nuvio_evict_pieces(indices);
-        resume_save_requests.insert(route.torrent_id);
-        state.next_save_request = now + resume_save_retry_interval;
+        if (now >= state.next_save_request) {
+            resume_save_requests.insert(route.torrent_id);
+            state.next_save_request = now + resume_save_retry_interval;
+        }
     }
 
     void release_evicted_ranges() {
