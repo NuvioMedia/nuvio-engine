@@ -51,13 +51,15 @@ public:
         const lt::torrent_handle& handle,
         const std::string& torrent_id,
         std::uint32_t file_index,
-        const TorrentFileInfo& file
+        const TorrentFileInfo& file,
+        std::uint32_t stream_flags = 0
     );
     void set_wakeup(std::function<void()> wake);
     void poll();
     [[nodiscard]] std::vector<StoppedStream> pop_expired_streams();
     void handle_read_piece(const lt::read_piece_alert& alert);
     void handle_block_finished(const lt::block_finished_alert& alert);
+    void handle_piece_finished(const lt::piece_finished_alert& alert);
     void handle_hash_failed(const lt::hash_failed_alert& alert);
     [[nodiscard]] std::string stop_stream(const std::string& stream_id);
     [[nodiscard]] bool has_stream_for_torrent(const std::string& torrent_id);

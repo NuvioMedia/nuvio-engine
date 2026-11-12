@@ -152,7 +152,8 @@ public:
         std::uint64_t request_id,
         const std::string& torrent_id,
         std::uint32_t file_index,
-        TorrentFileInfo file
+        TorrentFileInfo file,
+        std::uint32_t stream_flags
     ) = 0;
     virtual void remove_torrent(
         std::uint64_t request_id,

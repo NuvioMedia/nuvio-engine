@@ -505,10 +505,16 @@ nuvio_engine_status nuvio_engine_prepare_stream(
                 std::numeric_limits<std::uint32_t>::max()
             ? std::optional<std::size_t>{}
             : std::optional<std::size_t>{request->file_index};
+        auto flags = request->flags &
+            (NUVIO_ENGINE_STREAM_FLAG_VERIFIED_ONLY | NUVIO_ENGINE_STREAM_FLAG_BULK);
+        if ((flags & NUVIO_ENGINE_STREAM_FLAG_BULK) != 0) {
+            flags |= NUVIO_ENGINE_STREAM_FLAG_VERIFIED_ONLY;
+        }
         return engine->runtime->prepare_stream(
             *normalized,
             requested_index,
             std::move(filename_hint),
+            flags,
             *request_id
         );
     } catch (const std::bad_alloc&) {

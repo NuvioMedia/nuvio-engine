@@ -49,6 +49,7 @@ public:
         std::string torrent_id,
         std::optional<std::size_t> requested_index,
         std::string filename_hint,
+        std::uint32_t stream_flags,
         std::uint64_t& request_id
     );
     [[nodiscard]] nuvio_engine_status remove_torrent(
@@ -85,6 +86,7 @@ private:
         std::string torrent_id;
         std::string stream_id;
         std::uint32_t file_index = 0;
+        std::uint32_t stream_flags = 0;
         torrent::TorrentFileInfo file;
         std::uint64_t target_bytes = 0;
     };

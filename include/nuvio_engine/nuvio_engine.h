@@ -103,11 +103,28 @@ typedef struct nuvio_engine_event {
     char stream_url[512];
 } nuvio_engine_event;
 
+/*
+ * Flags for nuvio_engine_stream_request.flags. The default (0) keeps the
+ * original streaming behavior, where fully downloaded 16 KiB blocks of a piece
+ * may be served to the HTTP reader before the piece hash has been verified.
+ *
+ * VERIFIED_ONLY: never serve unverified data. The reader waits until the
+ *   whole piece has passed its hash check. Use this when the response bytes
+ *   are saved (downloads), since a later hash failure cannot be taken back.
+ * BULK: download mode. No time-critical piece deadlines are set (only piece
+ *   priorities), so the swarm is used at full pipelining. Implies VERIFIED_ONLY.
+ * Unknown bits are ignored.
+ */
+enum nuvio_engine_stream_flag_value {
+    NUVIO_ENGINE_STREAM_FLAG_VERIFIED_ONLY = 1,
+    NUVIO_ENGINE_STREAM_FLAG_BULK = 2
+};
+
 typedef struct nuvio_engine_stream_request {
     uint32_t struct_size;
     const char* torrent_id;
     uint32_t file_index;
-    uint32_t reserved_0;
+    uint32_t flags;
     const char* filename_hint;
 } nuvio_engine_stream_request;
 

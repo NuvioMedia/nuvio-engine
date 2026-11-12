@@ -242,6 +242,10 @@ struct LibtorrentStreamBridge::Impl {
         std::filesystem::path payload_path;
         std::shared_ptr<StreamActivity> activity;
         std::shared_ptr<StreamCounters> counters = std::make_shared<StreamCounters>();
+        // Never serve blocks before their piece has passed its hash check.
+        bool verified_only = false;
+        // Download mode: piece priorities only, no time-critical deadlines.
+        bool bulk = false;
     };
 
     using PieceKey = cache::PieceCacheKey;
@@ -381,7 +385,8 @@ struct LibtorrentStreamBridge::Impl {
         const lt::torrent_handle& handle,
         const std::string& id,
         const std::uint32_t file_index,
-        const TorrentFileInfo& file
+        const TorrentFileInfo& file,
+        const std::uint32_t stream_flags
     ) {
         if (shutting_down.load()) {
             throw std::runtime_error("stream bridge is shutting down");
@@ -407,6 +412,9 @@ struct LibtorrentStreamBridge::Impl {
             std::make_shared<StreamActivity>(std::chrono::steady_clock::now()),
         };
         route.target = "/stream/" + route.stream_id;
+        route.bulk = (stream_flags & NUVIO_ENGINE_STREAM_FLAG_BULK) != 0;
+        route.verified_only = route.bulk ||
+            (stream_flags & NUVIO_ENGINE_STREAM_FLAG_VERIFIED_ONLY) != 0;
         std::vector<std::string> previous_streams;
         {
             std::lock_guard lock(routes_mutex);
@@ -601,18 +609,24 @@ struct LibtorrentStreamBridge::Impl {
         auto deadline = std::chrono::steady_clock::now() + piece_wait_timeout;
         auto payload_readable = !payload.has_value() || payload->is_open();
         std::vector<char> buffer;
+        const auto finished_count = [](const std::vector<bool>& blocks) {
+            return static_cast<std::size_t>(std::ranges::count(blocks, true));
+        };
+        std::size_t seen_finished = 0;
         while (cursor < slice.end) {
             std::shared_ptr<std::vector<char>> verified;
             std::uint64_t unverified_end = cursor;
             {
                 std::unique_lock lock(waiter->mutex);
                 const auto unverified_ready = [&] {
-                    return payload_readable &&
+                    return payload_readable && !route.verified_only &&
                         finished_run_end(waiter->finished_blocks, cursor, slice.end) > cursor;
                 };
                 waiter->ready.wait_until(lock, deadline, [&] {
                     return waiter->done || token.stop_requested() ||
-                        demand_state->cancelled.load() || unverified_ready();
+                        demand_state->cancelled.load() || unverified_ready() ||
+                        (route.verified_only &&
+                            finished_count(waiter->finished_blocks) != seen_finished);
                 });
                 if (token.stop_requested() || demand_state->cancelled.load() ||
                     (waiter->done && !waiter->error.empty())) {
@@ -627,6 +641,13 @@ struct LibtorrentStreamBridge::Impl {
                         cursor,
                         slice.end
                     );
+                } else if (route.verified_only &&
+                           finished_count(waiter->finished_blocks) != seen_finished) {
+                    // Blocks of the piece are still arriving; keep waiting for
+                    // the hash check instead of timing out on a large piece.
+                    seen_finished = finished_count(waiter->finished_blocks);
+                    deadline = std::chrono::steady_clock::now() + piece_wait_timeout;
+                    continue;
                 } else {
                     waiter->cancelled = true;
                     return false;
@@ -1025,6 +1046,34 @@ struct LibtorrentStreamBridge::Impl {
         }
     }
 
+    bool torrent_is_bulk(const std::string& id) {
+        std::lock_guard lock(routes_mutex);
+        return std::ranges::any_of(routes, [&](const auto& route) {
+            return route.second.torrent_id == id && route.second.bulk;
+        });
+    }
+
+    // Bulk streams set no piece deadlines, so nothing asks libtorrent for the
+    // piece data once it is complete. Read it as soon as it has been verified.
+    void handle_piece_finished(const lt::piece_finished_alert& alert) {
+        if (piece_waiters.empty()) {
+            return;
+        }
+        const PieceKey key{
+            torrent_id(alert.handle),
+            static_cast<std::uint32_t>(static_cast<int>(alert.piece_index)),
+        };
+        if (!piece_waiters.contains(key) || requested_reads.contains(key) ||
+            !torrent_is_bulk(key.torrent_id)) {
+            return;
+        }
+        try {
+            alert.handle.read_piece(alert.piece_index);
+            requested_reads.try_emplace(key, std::chrono::steady_clock::now());
+        } catch (...) {
+        }
+    }
+
     void handle_hash_failed(const lt::hash_failed_alert& alert) {
         const PieceKey key{
             torrent_id(alert.handle),
@@ -1094,6 +1143,9 @@ struct LibtorrentStreamBridge::Impl {
             }
         } catch (...) {
             return;
+        }
+        if (!plan.deadline_order.empty() && torrent_is_bulk(id)) {
+            plan.deadline_order.clear();
         }
         if (const auto focused = active_demands.find(plan.focused_demand_id);
             focused != active_demands.end()) {
@@ -2009,9 +2061,14 @@ PreparedStream LibtorrentStreamBridge::register_stream(
     const lt::torrent_handle& handle,
     const std::string& torrent_id,
     const std::uint32_t file_index,
-    const TorrentFileInfo& file
+    const TorrentFileInfo& file,
+    const std::uint32_t stream_flags
 ) {
-    return impl_->register_stream(handle, torrent_id, file_index, file);
+    return impl_->register_stream(handle, torrent_id, file_index, file, stream_flags);
+}
+
+void LibtorrentStreamBridge::handle_piece_finished(const lt::piece_finished_alert& alert) {
+    impl_->handle_piece_finished(alert);
 }
 
 void LibtorrentStreamBridge::poll() {

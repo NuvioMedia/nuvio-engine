@@ -148,7 +148,8 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
             lt::alert_category::performance_warning |
             lt::alert_category::dht |
             lt::alert_category::file_progress |
-            lt::alert_category::block_progress
+            lt::alert_category::block_progress |
+            lt::alert_category::piece_progress
     );
     if (config.upload_mode == NUVIO_ENGINE_UPLOAD_LIMITED) {
         settings.set_int(
@@ -333,7 +334,8 @@ public:
         const std::uint64_t request_id,
         const std::string& id,
         const std::uint32_t file_index,
-        TorrentFileInfo file
+        TorrentFileInfo file,
+        const std::uint32_t stream_flags
     ) override {
         const auto torrent = handles_.find(id);
         if (torrent == handles_.end() || !torrent->second.is_valid()) {
@@ -349,7 +351,7 @@ public:
         if (!metadata || file_index >= static_cast<std::uint32_t>(metadata->num_files())) {
             throw std::runtime_error("selected torrent file is unavailable");
         }
-        PendingPrepare prepare{request_id, file_index, std::move(file)};
+        PendingPrepare prepare{request_id, file_index, std::move(file), stream_flags};
         if (torrent->second.status().is_seeding) {
             queued_events_.push_back(prepared_event(torrent->second, id, prepare));
             return;
@@ -532,6 +534,8 @@ public:
                 stream_bridge_->handle_block_finished(*block);
             } else if (const auto* piece = lt::alert_cast<lt::read_piece_alert>(alert)) {
                 stream_bridge_->handle_read_piece(*piece);
+            } else if (const auto* done = lt::alert_cast<lt::piece_finished_alert>(alert)) {
+                stream_bridge_->handle_piece_finished(*done);
             } else if (const auto* failed_hash = lt::alert_cast<lt::hash_failed_alert>(alert)) {
                 stream_bridge_->handle_hash_failed(*failed_hash);
             } else if (const auto* metadata = lt::alert_cast<lt::metadata_received_alert>(alert)) {
@@ -734,6 +738,7 @@ private:
         std::uint64_t request_id;
         std::uint32_t file_index;
         TorrentFileInfo file;
+        std::uint32_t stream_flags = 0;
     };
 
     struct TorrentTelemetry {
@@ -1568,7 +1573,8 @@ private:
             handle,
             id,
             prepare.file_index,
-            prepare.file
+            prepare.file,
+            prepare.stream_flags
         );
         event.stream_id = stream.stream_id;
         event.stream_url = stream.url;
