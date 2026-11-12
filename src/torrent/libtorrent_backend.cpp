@@ -290,6 +290,10 @@ public:
         const auto existing = handles_.find(id);
         if (existing != handles_.end() && existing->second.is_valid()) {
             activate_torrent(id, existing->second);
+            if (existing->second.status().has_metadata &&
+                !stream_bridge_->has_stream_for_torrent(id)) {
+                mark_warm(id);
+            }
             auto* context = existing->second.userdata().get<RequestContext>();
             if (context != nullptr) {
                 context->request_id = request_id;
@@ -1882,6 +1886,12 @@ private:
             }
         }
         events.push_back({BackendEventType::torrent_added, request_id, id, {}, {}});
+        // A torrent that is added but never streamed has no stream to stop, so
+        // nothing else would ever start its warm timer.
+        if (alert.handle.status().has_metadata &&
+            !stream_bridge_->has_stream_for_torrent(id)) {
+            mark_warm(id);
+        }
         if (alert.handle.status().has_metadata && context != nullptr && !context->metadata_emitted) {
             context->metadata_emitted = true;
             events.push_back(metadata_event(
@@ -1903,6 +1913,10 @@ private:
         std::vector<BackendEvent>& events
     ) {
         auto* context = alert.handle.userdata().get<RequestContext>();
+        const auto id = torrent_id(alert.handle);
+        if (!stream_bridge_->has_stream_for_torrent(id)) {
+            mark_warm(id);
+        }
         if (context != nullptr && context->metadata_emitted) {
             return;
         }
