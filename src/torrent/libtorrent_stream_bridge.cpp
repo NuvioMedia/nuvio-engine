@@ -78,6 +78,11 @@ std::uint64_t saturating_product(const std::uint64_t left, const std::uint64_t r
         : left * right;
 }
 
+// Playback window plus read-ahead that is scheduled (and so downloaded) ahead
+// of a reader. Bulk streams use the same window, so the downloaded-but-unread
+// data of a stream never exceeds this value. Since the retention budget is at
+// least max(disk capacity, window + 80 MiB), that is at most 25% of the cache
+// for capacities >= 256 MiB and at most 44% for smaller ones.
 std::uint64_t readahead_for_disk_budget(const std::uint64_t disk_capacity_bytes) {
     return std::clamp(
         disk_capacity_bytes / 4,
@@ -1650,8 +1655,46 @@ struct LibtorrentStreamBridge::Impl {
         return found->second;
     }
 
+    // File-relative position of the slowest active reader of the stream, or
+    // nothing when no HTTP request is currently reading it. Unlike the anchor
+    // this also advances while the reader consumes pieces that were already on
+    // disk (those demands are not scheduled, so they never refresh the anchor).
+    std::optional<std::uint64_t> slowest_reader_cursor(const StreamRoute& route) const {
+        std::optional<std::uint64_t> cursor;
+        for (const auto& [demand_id, demand] : active_demands) {
+            static_cast<void>(demand_id);
+            if (demand.route.stream_id != route.stream_id) {
+                continue;
+            }
+            cursor = cursor.has_value()
+                ? std::min(*cursor, demand.range.start)
+                : demand.range.start;
+        }
+        return cursor;
+    }
+
     std::unordered_set<std::uint32_t> retention_protected_pieces(const std::string& id) const {
         std::unordered_set<std::uint32_t> result;
+        // Every active reader keeps its own read-ahead window, not just the
+        // one the anchor happens to follow.
+        for (const auto& [demand_id, demand] : active_demands) {
+            static_cast<void>(demand_id);
+            const auto& route = demand.route;
+            if (route.torrent_id != id || route.piece_size == 0 || route.file_size == 0 ||
+                demand.range.start >= route.file_size) {
+                continue;
+            }
+            const auto ahead = saturating_sum(window.playback_bytes, window.readahead_bytes);
+            const auto last = std::min(
+                saturating_sum(demand.range.start, ahead),
+                route.file_size - 1
+            );
+            const auto first_piece = (route.file_offset + demand.range.start) / route.piece_size;
+            const auto last_piece = (route.file_offset + last) / route.piece_size;
+            for (auto piece = first_piece; piece <= last_piece; ++piece) {
+                result.insert(static_cast<std::uint32_t>(piece));
+            }
+        }
         if (const auto schedule = current_schedules.find(id);
             schedule != current_schedules.end()) {
             for (const auto& [piece, priority] : schedule->second.priorities) {
@@ -1755,6 +1798,15 @@ struct LibtorrentStreamBridge::Impl {
         if (!metadata) {
             return;
         }
+        // The reader of a bulk stream copies every response byte to its own
+        // file, so pieces behind its cursor are never needed again, but every
+        // downloaded piece at or after the slowest cursor still is (evicting
+        // it would download it twice). With no reader connected nothing is
+        // known to be consumed, so a bulk stream evicts nothing.
+        const auto cursor = slowest_reader_cursor(route);
+        if (route.bulk && !cursor.has_value()) {
+            return;
+        }
         auto& state = retention_state(route);
         if (!state.release_supported) {
             return;
@@ -1791,11 +1843,12 @@ struct LibtorrentStreamBridge::Impl {
                 route.file_offset,
                 route.file_size,
                 route.piece_size,
-                anchor->second.range.start,
-                retained_behind_bytes,
+                cursor.value_or(anchor->second.range.start),
+                route.bulk ? std::uint64_t{0} : retained_behind_bytes,
                 saturating_sum(window.playback_bytes, window.readahead_bytes),
-                retained_edge_bytes,
+                route.bulk ? std::uint64_t{0} : retained_edge_bytes,
                 target,
+                route.bulk,
             },
             retained,
             retention_protected_pieces(route.torrent_id),

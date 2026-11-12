@@ -61,6 +61,9 @@ std::vector<std::uint32_t> plan_retention_evictions(
         if (piece >= keep_first && piece <= keep_last) {
             continue;
         }
+        if (window.behind_only && piece >= position_piece && piece <= last_file_piece) {
+            continue;
+        }
         if (edge > 0 && piece >= first_file_piece &&
             (piece <= head_last || (piece >= tail_first && piece <= last_file_piece))) {
             continue;

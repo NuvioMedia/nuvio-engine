@@ -18,6 +18,11 @@ struct RetentionWindow {
     std::uint64_t ahead_bytes = 0;
     std::uint64_t edge_bytes = 0;
     std::uint64_t budget_bytes = 0;
+    // Only pieces of the streamed file that lie fully before the piece holding
+    // `position` may be evicted (plus pieces outside the file). Used for bulk
+    // streams, whose consumer has already stored everything behind the cursor
+    // and still needs every downloaded piece at or after it.
+    bool behind_only = false;
 };
 
 [[nodiscard]] std::vector<std::uint32_t> plan_retention_evictions(
