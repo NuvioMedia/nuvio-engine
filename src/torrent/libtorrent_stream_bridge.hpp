@@ -57,6 +57,8 @@ public:
     void set_wakeup(std::function<void()> wake);
     void poll();
     [[nodiscard]] bool has_pending_work();
+    // Incremented whenever evicted piece ranges were released from payload files.
+    [[nodiscard]] std::uint64_t released_range_generation() const;
     [[nodiscard]] std::vector<StoppedStream> pop_expired_streams();
     void handle_read_piece(const lt::read_piece_alert& alert);
     void handle_block_finished(const lt::block_finished_alert& alert);

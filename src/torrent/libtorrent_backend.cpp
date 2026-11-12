@@ -70,6 +70,7 @@ constexpr int streaming_session_tick_milliseconds = 100;
 constexpr std::chrono::minutes session_checkpoint_interval{5};
 constexpr std::chrono::seconds peer_info_interval{3};
 constexpr int minimum_torrent_connections = 20;
+constexpr std::chrono::minutes disk_cache_rescan_interval{5};
 
 // Connection attempts each hold a file descriptor while pending, so the attempt
 // rate and the first-tracker-response burst stay small even for the fast
@@ -339,6 +340,7 @@ public:
             }
         }
         params.save_path = prepare_payload_path(id).string();
+        disk_cache_dirty_ = true;
         params.flags |= lt::torrent_flags::upload_mode;
         params.flags &= ~lt::torrent_flags::auto_managed;
         params.flags &= ~lt::torrent_flags::paused;
@@ -1296,6 +1298,7 @@ private:
     void enforce_disk_cache(std::vector<BackendEvent>& events) {
         try {
             const auto stats = disk_cache_.enforce(protected_torrents());
+            note_disk_cache_scanned(std::chrono::steady_clock::now());
             last_disk_cache_error_.clear();
             if (stats.over_budget) {
                 request_cache_unloads(events, false);
@@ -1358,6 +1361,31 @@ private:
         }
     }
 
+    // The idle recursive payload scan is only needed when something may have
+    // changed the payload directories (downloaded bytes, added/removed torrents,
+    // released ranges), while over budget, or as a slow safety net for changes
+    // made outside the engine. The 5 s measurement while a reader is active is
+    // not gated: it is the only way to notice growth outside libtorrent's
+    // accounting and it reuses cached sizes of unprotected torrents.
+    [[nodiscard]] bool disk_cache_scan_needed(
+        const std::chrono::steady_clock::time_point now
+    ) {
+        const auto released = stream_bridge_->released_range_generation();
+        if (released != seen_release_generation_) {
+            seen_release_generation_ = released;
+            disk_cache_dirty_ = true;
+        }
+        const auto& stats = disk_cache_.stats();
+        return disk_cache_dirty_ || stats.over_budget ||
+            stats.used_bytes > stats.capacity_bytes ||
+            now - last_disk_cache_scan_ >= disk_cache_rescan_interval;
+    }
+
+    void note_disk_cache_scanned(const std::chrono::steady_clock::time_point now) {
+        disk_cache_dirty_ = false;
+        last_disk_cache_scan_ = now;
+    }
+
     void measure_disk_cache(
         const std::chrono::steady_clock::time_point now,
         std::vector<BackendEvent>& events
@@ -1368,6 +1396,7 @@ private:
         next_disk_cache_measurement_ = now + std::chrono::seconds(5);
         try {
             static_cast<void>(disk_cache_.measure(protected_torrents()));
+            note_disk_cache_scanned(now);
             last_disk_cache_error_.clear();
         } catch (const std::exception& error) {
             report_disk_cache_error(error.what(), events);
@@ -1389,6 +1418,9 @@ private:
             return;
         }
         next_disk_cache_check_ = now + std::chrono::seconds(30);
+        if (!disk_cache_scan_needed(now)) {
+            return;
+        }
         enforce_disk_cache(events);
     }
 
@@ -1455,7 +1487,11 @@ private:
             );
             telemetry.download_rate = nonnegative(status.download_payload_rate);
             telemetry.upload_rate = nonnegative(status.upload_payload_rate);
-            telemetry.total_download = nonnegative(status.total_payload_download);
+            const auto total_download = nonnegative(status.total_payload_download);
+            if (total_download != telemetry.total_download) {
+                disk_cache_dirty_ = true;
+            }
+            telemetry.total_download = total_download;
             telemetry.total_upload = nonnegative(status.total_payload_upload);
         }
     }
@@ -1760,6 +1796,7 @@ private:
     }
 
     void handle_added(const lt::add_torrent_alert& alert, std::vector<BackendEvent>& events) {
+        disk_cache_dirty_ = true;
         auto* context = alert.params.userdata.get<RequestContext>();
         const auto request_id = context == nullptr ? 0 : context->request_id;
         if (alert.error) {
@@ -1912,6 +1949,7 @@ private:
         const lt::torrent_removed_alert& alert,
         std::vector<BackendEvent>& events
     ) {
+        disk_cache_dirty_ = true;
         auto* context = alert.userdata.get<RequestContext>();
         const auto id = context == nullptr || context->torrent_id.empty()
             ? torrent_id(alert.info_hashes)
@@ -1985,6 +2023,9 @@ private:
     std::chrono::steady_clock::time_point last_telemetry_request_ =
         std::chrono::steady_clock::now() - std::chrono::seconds(1);
     std::unordered_map<std::string, int> applied_connection_caps_;
+    bool disk_cache_dirty_ = true;
+    std::uint64_t seen_release_generation_ = 0;
+    std::chrono::steady_clock::time_point last_disk_cache_scan_{};
     int connection_limit_ = 0;
     std::chrono::steady_clock::time_point last_peer_info_request_{};
     std::chrono::steady_clock::time_point next_warm_check_{};

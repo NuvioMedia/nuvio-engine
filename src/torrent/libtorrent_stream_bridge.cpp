@@ -1905,6 +1905,7 @@ struct LibtorrentStreamBridge::Impl {
                     static_cast<std::uint64_t>(slice.offset),
                     static_cast<std::uint64_t>(slice.size)
                 );
+                ++release_generation;
                 if (released == storage::RangeRelease::unsupported) {
                     state.release_supported = false;
                     break;
@@ -2062,6 +2063,7 @@ struct LibtorrentStreamBridge::Impl {
     std::chrono::steady_clock::time_point next_retention_check{};
     std::chrono::steady_clock::time_point next_range_release{};
     std::optional<bool> range_release_supported;
+    std::uint64_t release_generation = 0;
     std::atomic_bool shutting_down = false;
     std::unique_ptr<http::LoopbackServer> server;
 
@@ -2105,6 +2107,10 @@ PreparedStream LibtorrentStreamBridge::register_stream(
 
 void LibtorrentStreamBridge::handle_piece_finished(const lt::piece_finished_alert& alert) {
     impl_->handle_piece_finished(alert);
+}
+
+std::uint64_t LibtorrentStreamBridge::released_range_generation() const {
+    return impl_->release_generation;
 }
 
 bool LibtorrentStreamBridge::has_pending_work() {
