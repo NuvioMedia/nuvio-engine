@@ -67,6 +67,7 @@ constexpr const char* dht_bootstrap_node_list =
 constexpr int idle_session_tick_milliseconds = 500;
 constexpr int streaming_session_tick_milliseconds = 100;
 constexpr std::chrono::minutes session_checkpoint_interval{5};
+constexpr std::chrono::seconds peer_info_interval{3};
 
 // Connection attempts each hold a file descriptor while pending, so the attempt
 // rate and the first-tracker-response burst stay small even for the fast
@@ -1197,13 +1198,48 @@ private:
             return;
         }
         session_.post_torrent_updates(lt::status_flags_t{});
+        // post_peer_info copies every peer's piece bitfield, so only request it
+        // for torrents that are being read, and at most every few seconds.
+        const auto poll_peers = now - last_peer_info_request_ >= peer_info_interval;
         for (const auto& [id, handle] : handles_) {
-            static_cast<void>(id);
-            if (handle.is_valid()) {
+            if (!handle.is_valid()) {
+                continue;
+            }
+            if (!stream_bridge_->has_active_reader(id)) {
+                clear_peer_telemetry(id);
+                continue;
+            }
+            if (poll_peers) {
                 handle.post_peer_info();
             }
         }
+        if (poll_peers) {
+            last_peer_info_request_ = now;
+        }
         last_telemetry_request_ = now;
+    }
+
+    // Peer-derived counters are only refreshed while a torrent has an active
+    // reader; zero them afterwards instead of reporting stale values.
+    void clear_peer_telemetry(const std::string& id) {
+        const auto found = telemetry_.find(id);
+        if (found == telemetry_.end()) {
+            return;
+        }
+        auto& telemetry = found->second;
+        telemetry.interested_peers = 0;
+        telemetry.unchoked_peers = 0;
+        telemetry.downloading_peers = 0;
+        telemetry.snubbed_peers = 0;
+        telemetry.pending_block_requests = 0;
+        telemetry.target_block_requests = 0;
+        telemetry.timed_out_block_requests = 0;
+        telemetry.connecting_peers = 0;
+        telemetry.handshaking_peers = 0;
+        telemetry.target_piece_peers = 0;
+        telemetry.target_piece_unchoked_peers = 0;
+        telemetry.target_piece_downloading_peers = 0;
+        telemetry.off_target_downloading_peers = 0;
     }
 
     void mark_warm(const std::string& id) {
@@ -1905,6 +1941,7 @@ private:
         std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_telemetry_request_ =
         std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    std::chrono::steady_clock::time_point last_peer_info_request_{};
     std::chrono::steady_clock::time_point next_warm_check_{};
     std::chrono::steady_clock::time_point next_disk_cache_check_ =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(300);

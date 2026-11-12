@@ -1477,6 +1477,13 @@ struct LibtorrentStreamBridge::Impl {
         });
     }
 
+    bool has_active_reader(const std::string& id) const {
+        return !blocking_pieces(id).empty() ||
+            std::ranges::any_of(active_demands, [&](const auto& entry) {
+                return entry.second.route.torrent_id == id;
+            });
+    }
+
     std::vector<std::uint32_t> blocking_pieces(const std::string& id) const {
         const auto schedule = current_schedules.find(id);
         if (schedule == current_schedules.end()) {
@@ -1954,7 +1961,7 @@ struct LibtorrentStreamBridge::Impl {
                     static_cast<void>(target);
                     stream_progress_cache.push_back(progress_for(route));
                 }
-                next_progress_sample = now + std::chrono::milliseconds(250);
+                next_progress_sample = now + std::chrono::milliseconds(500);
             }
             result.streams = stream_progress_cache;
         }
@@ -2125,6 +2132,10 @@ std::string LibtorrentStreamBridge::stop_stream(const std::string& stream_id) {
 
 bool LibtorrentStreamBridge::has_stream_for_torrent(const std::string& torrent_id) {
     return impl_->has_stream_for_torrent(torrent_id);
+}
+
+bool LibtorrentStreamBridge::has_active_reader(const std::string& torrent_id) const {
+    return impl_->has_active_reader(torrent_id);
 }
 
 std::vector<std::uint32_t> LibtorrentStreamBridge::blocking_pieces(

@@ -64,6 +64,7 @@ public:
     void handle_hash_failed(const lt::hash_failed_alert& alert);
     [[nodiscard]] std::string stop_stream(const std::string& stream_id);
     [[nodiscard]] bool has_stream_for_torrent(const std::string& torrent_id);
+    [[nodiscard]] bool has_active_reader(const std::string& torrent_id) const;
     [[nodiscard]] std::vector<std::uint32_t> blocking_pieces(
         const std::string& torrent_id
     ) const;
