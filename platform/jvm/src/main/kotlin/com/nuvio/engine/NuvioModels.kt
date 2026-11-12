@@ -29,6 +29,22 @@ public data class NuvioEvent(
     val streamUrl: String?,
 )
 
+/**
+ * How the bytes of a prepared stream are consumed.
+ *
+ * [PLAYBACK] is the default: the engine sets time-critical piece deadlines for
+ * the reader position and may serve blocks before their piece hash is checked.
+ *
+ * [DOWNLOAD] is for callers that copy the HTTP response into their own file:
+ * only hash-verified data is served, no piece deadlines are set (the swarm is
+ * used at full pipelining), and pieces behind the reader are released from the
+ * engine's cache. Playback streams of other torrents take priority over it.
+ */
+public enum class NuvioStreamMode(internal val nativeFlags: Int) {
+    PLAYBACK(0),
+    DOWNLOAD(2),
+}
+
 public data class NuvioTorrentFile(
     val index: Int,
     val offset: Long,

@@ -35,6 +35,7 @@ internal class FakeNuvioNativeApi : NuvioNativeApi {
         val torrentId: String,
         val fileIndex: Int?,
         val filenameHint: String?,
+        val flags: Int = 0,
     )
 
     override fun apiVersion(): Int = reportedApiVersion
@@ -76,8 +77,9 @@ internal class FakeNuvioNativeApi : NuvioNativeApi {
         torrentId: String,
         fileIndex: Int?,
         filenameHint: String?,
+        flags: Int,
     ): NativeCommandResult {
-        preparedStreams += PreparedStreamCall(torrentId, fileIndex, filenameHint)
+        preparedStreams += PreparedStreamCall(torrentId, fileIndex, filenameHint, flags)
         return command()
     }
 

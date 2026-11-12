@@ -142,14 +142,17 @@ internal class JnaNuvioNativeApi(
         torrentId: String,
         fileIndex: Int?,
         filenameHint: String?,
+        flags: Int,
     ): NativeCommandResult {
         val id = nativeString(torrentId)
         val hint = filenameHint?.let(::nativeString)
         val request = NativeStreamRequest()
         library.nuvio_engine_stream_request_init_sized(request, request.size())
+        val streamFlags = flags
         request.apply {
             this.torrentId = id
             fileIndex?.let { this.fileIndex = it }
+            this.flags = streamFlags
             this.filenameHint = hint
             write()
         }

@@ -24,6 +24,8 @@ class JnaNativeLayoutTest {
         assertEquals(40, NativeConfig().offsetOf("listenPort"))
         assertEquals(72, NativeConfig().offsetOf("tlsCaBundlePath"))
         assertEquals(24, NativeTorrentRequest().offsetOf("torrentData"))
+        assertEquals(20, NativeStreamRequest().offsetOf("flags"))
+        assertEquals(24, NativeStreamRequest().offsetOf("filenameHint"))
         assertEquals(368, NativeEventStructure().offsetOf("fileSize"))
         assertEquals(376, NativeEventStructure().offsetOf("streamId"))
         assertEquals(32, NativeFileStructure().offsetOf("path"))

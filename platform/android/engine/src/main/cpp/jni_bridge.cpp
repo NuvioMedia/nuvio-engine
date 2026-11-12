@@ -372,7 +372,8 @@ Java_com_nuvio_engine_internal_NativeBridge_nativePrepareStream(
     const jlong handle,
     jstring torrent_id_value,
     const jint file_index,
-    jstring filename_hint_value
+    jstring filename_hint_value,
+    const jint flags
 ) {
     std::string torrent_id;
     std::string filename_hint;
@@ -386,6 +387,7 @@ Java_com_nuvio_engine_internal_NativeBridge_nativePrepareStream(
     nuvio_engine_stream_request_init(&request);
     request.torrent_id = torrent_id.c_str();
     request.file_index = static_cast<std::uint32_t>(file_index);
+    request.flags = static_cast<std::uint32_t>(flags);
     request.filename_hint = filename_hint_value == nullptr ? nullptr : filename_hint.c_str();
     std::uint64_t request_id = 0;
     const auto status = nuvio_engine_prepare_stream(
