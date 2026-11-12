@@ -67,7 +67,8 @@ constexpr const char* dht_bootstrap_node_list =
     "router.utorrent.com:6881,dht.transmissionbt.com:6881";
 constexpr int idle_session_tick_milliseconds = 500;
 constexpr int streaming_session_tick_milliseconds = 100;
-constexpr std::chrono::minutes session_checkpoint_interval{5};
+// iOS can kill the app without a shutdown call, so DHT state is saved often.
+constexpr std::chrono::seconds session_checkpoint_interval{60};
 constexpr std::chrono::seconds peer_info_interval{3};
 constexpr int minimum_torrent_connections = 20;
 constexpr std::chrono::minutes disk_cache_rescan_interval{5};
@@ -1158,7 +1159,11 @@ private:
         if (contents.size() > maximum_session_state_size) {
             throw std::runtime_error("DHT state exceeds configured size limit");
         }
+        if (saved_session_state_.has_value() && *saved_session_state_ == contents) {
+            return;
+        }
         storage::write_file_atomically(session_state_path_, contents);
+        saved_session_state_ = contents;
     }
 
     void run_periodic_checkpoints(std::vector<BackendEvent>& events) {
@@ -2022,6 +2027,7 @@ private:
     std::chrono::steady_clock::time_point last_telemetry_request_ =
         std::chrono::steady_clock::now() - std::chrono::seconds(1);
     std::unordered_map<std::string, int> applied_connection_caps_;
+    std::optional<std::vector<char>> saved_session_state_;
     bool disk_cache_dirty_ = true;
     std::uint64_t seen_release_generation_ = 0;
     std::chrono::steady_clock::time_point last_disk_cache_scan_{};
