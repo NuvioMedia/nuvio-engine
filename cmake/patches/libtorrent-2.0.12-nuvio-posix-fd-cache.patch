@@ -1,0 +1,166 @@
+diff --git a/include/libtorrent/aux_/posix_storage.hpp b/include/libtorrent/aux_/posix_storage.hpp
+--- a/include/libtorrent/aux_/posix_storage.hpp
++++ b/include/libtorrent/aux_/posix_storage.hpp
+@@ -47,0 +48 @@ POSSIBILITY OF SUCH DAMAGE.
++#include <array>
+@@ -97,0 +99,9 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++		// nuvio_fd_cache: a few open descriptors, most recently used first.
++		// posix_disk_io runs all disk jobs on one thread, so no locking.
++		struct nuvio_fd_slot { int fd = -1; file_index_t file{-1}; bool writable = false; };
++		int nuvio_open_fd(file_index_t idx, bool writable, storage_error& ec);
++		void nuvio_close_fds();
++		std::array<nuvio_fd_slot, 4> m_nuvio_fds;
++#endif
++
+diff --git a/src/posix_storage.cpp b/src/posix_storage.cpp
+--- a/src/posix_storage.cpp
++++ b/src/posix_storage.cpp
+@@ -43,0 +44,5 @@ POSSIBILITY OF SUCH DAMAGE.
++#else
++#include <fcntl.h>
++#include <unistd.h>
++#include <cerrno>
++#include <algorithm>
+@@ -73,0 +79,3 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++		nuvio_close_fds();
++#endif
+@@ -199,0 +208,25 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++			int const fd = nuvio_open_fd(file_index, false, ec);
++			if (fd < 0) return -1;
++
++			ec.operation = operation_t::file_read;
++
++			int ret = 0;
++			while (ret < buf.size())
++			{
++				ssize_t const r = ::pread(fd, buf.data() + ret
++					, static_cast<std::size_t>(buf.size() - ret)
++					, static_cast<off_t>(file_offset + ret));
++				if (r < 0 && errno == EINTR) continue;
++				if (r <= 0)
++				{
++					if (ret == 0)
++					{
++						if (r < 0) ec.ec.assign(errno, generic_category());
++						else ec.ec.assign(errors::file_too_short, libtorrent_category());
++					}
++					break;
++				}
++				ret += static_cast<int>(r);
++			}
++#else
+@@ -216,0 +250 @@ namespace aux {
++#endif
+@@ -262,0 +297,18 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++			int const fd = nuvio_open_fd(file_index, true, ec);
++			if (fd < 0) return -1;
++
++			ec.operation = operation_t::file_write;
++
++			int ret = 0;
++			while (ret < buf.size())
++			{
++				ssize_t const w = ::pwrite(fd, buf.data() + ret
++					, static_cast<std::size_t>(buf.size() - ret)
++					, static_cast<off_t>(file_offset + ret));
++				if (w < 0 && errno == EINTR) continue;
++				if (w < 0) { ec.ec.assign(errno, generic_category()); break; }
++				if (w == 0) { ec.ec.assign(errors::file_too_short, libtorrent_category()); break; }
++				ret += static_cast<int>(w);
++			}
++#else
+@@ -279,0 +332 @@ namespace aux {
++#endif
+@@ -303,0 +357,3 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++		nuvio_close_fds();
++#endif
+@@ -317,0 +374,3 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++		nuvio_close_fds();
++#endif
+@@ -323,0 +383,3 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++		nuvio_close_fds();
++#endif
+@@ -341,0 +404,3 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++		nuvio_close_fds();
++#endif
+@@ -439,0 +505,72 @@ namespace aux {
++#ifndef TORRENT_WINDOWS
++	void posix_storage::nuvio_close_fds()
++	{
++		for (auto& slot : m_nuvio_fds)
++		{
++			if (slot.fd >= 0) ::close(slot.fd);
++			slot = nuvio_fd_slot{};
++		}
++	}
++
++	int posix_storage::nuvio_open_fd(file_index_t const idx, bool const writable
++		, storage_error& ec)
++	{
++		// a hit moves the slot to the front. A read-only slot can't serve a
++		// write; it is replaced by a read-write one below.
++		for (std::size_t i = 0; i < m_nuvio_fds.size(); ++i)
++		{
++			if (m_nuvio_fds[i].fd < 0 || m_nuvio_fds[i].file != idx) continue;
++			if (writable && !m_nuvio_fds[i].writable)
++			{
++				::close(m_nuvio_fds[i].fd);
++				m_nuvio_fds[i] = nuvio_fd_slot{};
++				break;
++			}
++			std::rotate(m_nuvio_fds.begin(), m_nuvio_fds.begin() + std::ptrdiff_t(i)
++				, m_nuvio_fds.begin() + std::ptrdiff_t(i) + 1);
++			return m_nuvio_fds[0].fd;
++		}
++
++		std::string const fn = files().file_path(idx, m_save_path);
++		int const base_flags = (writable ? O_RDWR : O_RDONLY)
++#ifdef O_CLOEXEC
++			| O_CLOEXEC
++#endif
++			;
++		int fd = -1;
++		do { fd = ::open(fn.c_str(), base_flags); } while (fd < 0 && errno == EINTR);
++		if (fd < 0)
++		{
++			ec.ec.assign(errno, generic_category());
++			if (writable && ec.ec == boost::system::errc::no_such_file_or_directory)
++			{
++				// the directory the file is in probably doesn't exist yet
++				ec.ec.clear();
++				create_directories(parent_path(fn), ec.ec);
++				if (ec.ec)
++				{
++					ec.file(idx);
++					ec.operation = operation_t::mkdir;
++					return -1;
++				}
++				do { fd = ::open(fn.c_str(), base_flags | O_CREAT | O_TRUNC, 0666); }
++				while (fd < 0 && errno == EINTR);
++				if (fd >= 0) ec.ec.clear();
++				else ec.ec.assign(errno, generic_category());
++			}
++			if (fd < 0)
++			{
++				ec.file(idx);
++				ec.operation = operation_t::file_open;
++				return -1;
++			}
++		}
++
++		// drop the least recently used descriptor and insert at the front
++		if (m_nuvio_fds.back().fd >= 0) ::close(m_nuvio_fds.back().fd);
++		std::rotate(m_nuvio_fds.begin(), m_nuvio_fds.end() - 1, m_nuvio_fds.end());
++		m_nuvio_fds[0] = nuvio_fd_slot{fd, idx, writable};
++		return fd;
++	}
++#endif
++
