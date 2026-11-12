@@ -139,15 +139,15 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     }
     settings.set_int(
         lt::settings_pack::alert_mask,
+        // Only categories whose alerts pop_events() handles. block_progress
+        // feeds the partial-block tracking of the stream bridge and
+        // piece_progress drives reads of completed pieces for bulk streams.
         lt::alert_category::error |
-            lt::alert_category::peer |
             lt::alert_category::storage |
             lt::alert_category::tracker |
             lt::alert_category::connect |
             lt::alert_category::status |
-            lt::alert_category::performance_warning |
             lt::alert_category::dht |
-            lt::alert_category::file_progress |
             lt::alert_category::block_progress |
             lt::alert_category::piece_progress
     );
