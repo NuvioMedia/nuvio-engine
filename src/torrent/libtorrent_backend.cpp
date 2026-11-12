@@ -50,6 +50,7 @@ constexpr int request_queue_seconds = 1;
 constexpr int maximum_outstanding_requests_per_peer = 64;
 constexpr int idle_session_tick_milliseconds = 500;
 constexpr int streaming_session_tick_milliseconds = 100;
+constexpr std::chrono::minutes session_checkpoint_interval{5};
 
 struct TorrentProfileSettings {
     int connection_limit;
@@ -466,8 +467,45 @@ public:
     }
 
     void set_wakeup(std::function<void()> wake) override {
-        session_.set_alert_notify(wake);
         stream_bridge_->set_wakeup(std::move(wake));
+    }
+
+    void set_alert_wakeup(std::function<void()> wake) override {
+        session_.set_alert_notify(std::move(wake));
+    }
+
+    std::chrono::milliseconds idle_wait_hint() override {
+        constexpr std::chrono::milliseconds busy{25};
+        constexpr std::chrono::milliseconds idle_cap{250};
+        constexpr std::chrono::milliseconds minimum{5};
+        if (shutting_down_ || !queued_events_.empty() || !pending_.empty() ||
+            !pending_prepares_.empty() || !pending_removals_.empty() ||
+            !pending_resume_saves_.empty() || !pending_cache_unloads_.empty() ||
+            !pending_cache_removals_.empty() || !pending_disk_reclaims_.empty() ||
+            stream_bridge_->has_pending_work()) {
+            return busy;
+        }
+        // Nothing is streaming or in flight: sleep until the next due timer.
+        const auto now = std::chrono::steady_clock::now();
+        auto wait = idle_cap;
+        const auto consider = [&](const std::chrono::steady_clock::time_point due) {
+            wait = std::min(
+                wait,
+                std::chrono::duration_cast<std::chrono::milliseconds>(due - now)
+            );
+        };
+        consider(last_telemetry_request_ + std::chrono::seconds(1));
+        consider(last_resume_checkpoint_ + std::chrono::seconds(30));
+        consider(last_session_checkpoint_ + session_checkpoint_interval);
+        consider(next_disk_cache_check_);
+        if (warm_torrent_timeout_.count() != 0) {
+            for (const auto& [id, warm_since] : warm_since_) {
+                if (!quiesced_torrents_.contains(id)) {
+                    consider(std::max(warm_since + warm_torrent_timeout_, next_warm_check_));
+                }
+            }
+        }
+        return std::max(wait, minimum);
     }
 
     void shutdown() override {
@@ -1109,7 +1147,7 @@ private:
             }
             last_resume_checkpoint_ = now;
         }
-        if (now - last_session_checkpoint_ >= std::chrono::minutes(5)) {
+        if (now - last_session_checkpoint_ >= session_checkpoint_interval) {
             try {
                 save_session_state();
             } catch (const std::exception& error) {

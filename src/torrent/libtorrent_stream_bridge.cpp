@@ -865,6 +865,30 @@ struct LibtorrentStreamBridge::Impl {
         }
     }
 
+    // True while poll() has time-driven work outstanding. When false and no
+    // wakeup arrives, the owner may sleep for a long time.
+    bool has_pending_work() {
+        {
+            std::lock_guard lock(commands_mutex);
+            if (!commands.empty()) {
+                return true;
+            }
+        }
+        if (!piece_waiters.empty() || !active_demands.empty() || !requested_reads.empty() ||
+            !expired_streams.empty() || !resume_save_requests.empty()) {
+            return true;
+        }
+        {
+            std::lock_guard lock(routes_mutex);
+            if (!routes.empty()) {
+                return true;
+            }
+        }
+        return std::ranges::any_of(retention, [](const auto& entry) {
+            return !entry.second.evicted.empty();
+        });
+    }
+
     std::vector<StoppedStream> pop_expired_streams() {
         std::vector<StoppedStream> result;
         result.swap(expired_streams);
@@ -2069,6 +2093,10 @@ PreparedStream LibtorrentStreamBridge::register_stream(
 
 void LibtorrentStreamBridge::handle_piece_finished(const lt::piece_finished_alert& alert) {
     impl_->handle_piece_finished(alert);
+}
+
+bool LibtorrentStreamBridge::has_pending_work() {
+    return impl_->has_pending_work();
 }
 
 void LibtorrentStreamBridge::poll() {

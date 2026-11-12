@@ -1,6 +1,7 @@
 #ifndef NUVIO_ENGINE_PROTOCOL_BACKEND_HPP
 #define NUVIO_ENGINE_PROTOCOL_BACKEND_HPP
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -169,6 +170,14 @@ public:
     ) = 0;
     virtual void shutdown() = 0;
     virtual void set_wakeup(std::function<void()>) {
+    }
+    // Wakeup for backend alert notifications; the runtime coalesces these.
+    virtual void set_alert_wakeup(std::function<void()>) {
+    }
+    // Longest time the runtime may sleep before it has to poll again when no
+    // command or wakeup arrives.
+    [[nodiscard]] virtual std::chrono::milliseconds idle_wait_hint() {
+        return std::chrono::milliseconds(25);
     }
     [[nodiscard]] virtual std::vector<BackendEvent> pop_events() = 0;
     [[nodiscard]] virtual BackendStats statistics() = 0;
