@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <limits>
@@ -64,6 +65,16 @@ int socket_error() {
     return WSAGetLastError();
 #else
     return errno;
+#endif
+}
+
+// accept() failed because the process or system is out of descriptors or
+// memory. Retrying immediately would spin at 100% CPU until one is released.
+bool is_resource_exhaustion(const int error) {
+#if defined(_WIN32)
+    return error == WSAEMFILE || error == WSAENOBUFS;
+#else
+    return error == EMFILE || error == ENFILE || error == ENOBUFS || error == ENOMEM;
 #endif
 }
 
@@ -542,8 +553,12 @@ struct LoopbackServer::Impl {
             }
             const auto client = accept(listening_socket, nullptr, nullptr);
             if (client == invalid_socket) {
+                const auto error = socket_error();
                 if (stopping.load()) {
                     return;
+                }
+                if (is_resource_exhaustion(error)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
                 continue;
             }

@@ -11,6 +11,10 @@
 #include <optional>
 #include <string>
 
+#if defined(__APPLE__)
+#include <sys/resource.h>
+#endif
+
 #if defined(NUVIO_ENGINE_HAS_LIBTORRENT)
 const char* libtorrent_version_string();
 #endif
@@ -30,6 +34,24 @@ struct nuvio_engine {
 };
 
 namespace {
+
+// iOS starts with a soft limit of 256 descriptors, which a swarm of peer
+// sockets, payload files and HTTP clients exhausts. Raise it when allowed.
+void raise_file_descriptor_limit() {
+#if defined(__APPLE__)
+    rlimit limit{};
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        return;
+    }
+    constexpr rlim_t wanted = 4096;
+    const rlim_t target = limit.rlim_max < wanted ? limit.rlim_max : wanted;
+    if (limit.rlim_cur >= target) {
+        return;
+    }
+    limit.rlim_cur = target;
+    static_cast<void>(setrlimit(RLIMIT_NOFILE, &limit));
+#endif
+}
 
 constexpr std::uint64_t default_memory_cache_capacity = 64ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t default_disk_cache_capacity = 2ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -300,6 +322,7 @@ nuvio_engine_status nuvio_engine_create(
         return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
     }
 
+    raise_file_descriptor_limit();
     try {
         const auto stream_inactivity_timeout = config->struct_size >= config_v2_size
             ? config->stream_inactivity_timeout_milliseconds

@@ -52,6 +52,9 @@ constexpr int idle_session_tick_milliseconds = 500;
 constexpr int streaming_session_tick_milliseconds = 100;
 constexpr std::chrono::minutes session_checkpoint_interval{5};
 
+// Connection attempts each hold a file descriptor while pending, so the attempt
+// rate and the first-tracker-response burst stay small even for the fast
+// profile (iOS defaults to a soft limit of 256 descriptors).
 struct TorrentProfileSettings {
     int connection_limit;
     int connection_attempts_per_second;
@@ -63,13 +66,13 @@ TorrentProfileSettings torrent_profile_settings(
 ) {
     switch (profile) {
     case NUVIO_ENGINE_TORRENT_PROFILE_SOFT:
-        return {35, 35, 35};
+        return {35, 20, 20};
     case NUVIO_ENGINE_TORRENT_PROFILE_BALANCED:
-        return {120, 120, 120};
+        return {120, 30, 40};
     case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
-        return {200, 200, 200};
+        return {200, 40, 60};
     }
-    return {120, 120, 120};
+    return {120, 30, 40};
 }
 
 enum class MetadataSource {
