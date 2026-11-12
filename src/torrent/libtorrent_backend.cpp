@@ -8,6 +8,7 @@
 #include <cctype>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -68,6 +69,7 @@ constexpr int idle_session_tick_milliseconds = 500;
 constexpr int streaming_session_tick_milliseconds = 100;
 constexpr std::chrono::minutes session_checkpoint_interval{5};
 constexpr std::chrono::seconds peer_info_interval{3};
+constexpr int minimum_torrent_connections = 20;
 
 // Connection attempts each hold a file descriptor while pending, so the attempt
 // rate and the first-tracker-response burst stay small even for the fast
@@ -652,6 +654,7 @@ public:
         run_disk_cache_enforcement(events);
         request_telemetry_update();
         update_session_tick();
+        update_connection_caps();
         return events;
     }
 
@@ -869,6 +872,7 @@ private:
                 {},
             });
         }
+        connection_limit_ = torrent_profile_settings(config.torrent_profile).connection_limit;
         stream_bridge_ = std::make_unique<LibtorrentStreamBridge>(
             config.listen_port,
             config.memory_cache_capacity_bytes,
@@ -1625,6 +1629,45 @@ private:
         fast_session_tick_ = streaming;
     }
 
+    // connections_limit is shared by the whole session and libtorrent only
+    // rebalances it slowly (peer turnover). While several torrents have a
+    // stream, give each a fair share (never below 20). With one streaming
+    // torrent the per-torrent cap is removed so it keeps the full session limit.
+    void update_connection_caps() {
+        if (shutting_down_) {
+            return;
+        }
+        int streaming = 0;
+        for (const auto& [id, handle] : handles_) {
+            if (handle.is_valid() && stream_bridge_->has_stream_for_torrent(id)) {
+                ++streaming;
+            }
+        }
+        const auto cap = streaming <= 1
+            ? -1
+            : std::max(minimum_torrent_connections, connection_limit_ / streaming);
+        for (auto applied = applied_connection_caps_.begin();
+             applied != applied_connection_caps_.end();) {
+            applied = handles_.contains(applied->first)
+                ? std::next(applied)
+                : applied_connection_caps_.erase(applied);
+        }
+        for (const auto& [id, handle] : handles_) {
+            if (!handle.is_valid()) {
+                continue;
+            }
+            const auto found = applied_connection_caps_.find(id);
+            if (found != applied_connection_caps_.end() && found->second == cap) {
+                continue;
+            }
+            try {
+                handle.set_max_connections(cap);
+                applied_connection_caps_.insert_or_assign(id, cap);
+            } catch (...) {
+            }
+        }
+    }
+
     void announce_to_dht() {
         for (const auto& [id, handle] : handles_) {
             static_cast<void>(id);
@@ -1941,6 +1984,8 @@ private:
         std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_telemetry_request_ =
         std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    std::unordered_map<std::string, int> applied_connection_caps_;
+    int connection_limit_ = 0;
     std::chrono::steady_clock::time_point last_peer_info_request_{};
     std::chrono::steady_clock::time_point next_warm_check_{};
     std::chrono::steady_clock::time_point next_disk_cache_check_ =
