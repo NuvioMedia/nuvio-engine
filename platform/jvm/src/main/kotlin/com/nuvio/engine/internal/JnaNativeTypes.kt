@@ -97,14 +97,14 @@ internal class NativeEventStructure : NativeStructure() {
     "structSize",
     "torrentId",
     "fileIndex",
-    "reserved0",
+    "flags",
     "filenameHint",
 )
 internal class NativeStreamRequest : NativeStructure() {
     @JvmField var structSize: Int = 0
     @JvmField var torrentId: Pointer? = null
     @JvmField var fileIndex: Int = 0
-    @JvmField var reserved0: Int = 0
+    @JvmField var flags: Int = 0
     @JvmField var filenameHint: Pointer? = null
 }
 

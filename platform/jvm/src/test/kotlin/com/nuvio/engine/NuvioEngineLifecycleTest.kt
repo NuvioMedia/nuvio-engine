@@ -90,6 +90,38 @@ class NuvioEngineLifecycleTest {
     }
 
     @Test
+    fun downloadModeIsForwardedAsNativeStreamFlags() = runTest {
+        val api = FakeNuvioNativeApi()
+        val engine = createEngine(api)
+        try {
+            val prepared = async {
+                engine.prepareStream(torrentId, 3, mode = NuvioStreamMode.DOWNLOAD)
+            }
+            runCurrent()
+            assertEquals(
+                FakeNuvioNativeApi.PreparedStreamCall(torrentId, 3, null, flags = 2),
+                api.preparedStreams.single(),
+            )
+            api.enqueue(
+                nativeEvent(
+                    type = 4,
+                    requestId = 1,
+                    torrentId = torrentId,
+                    fileIndex = 3,
+                    fileSize = 1024,
+                    streamId = streamId,
+                    streamUrl = "http://127.0.0.1:12345/stream/$streamId",
+                ),
+            )
+            advanceTimeBy(20)
+            runCurrent()
+            assertEquals(streamId, prepared.await().id)
+        } finally {
+            engine.close()
+        }
+    }
+
+    @Test
     fun torrentErrorsFailOnlyTheirCorrelatedCommand() = runTest {
         val api = FakeNuvioNativeApi()
         val engine = createEngine(api)

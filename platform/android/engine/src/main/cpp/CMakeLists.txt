@@ -16,6 +16,9 @@ set(OPENSSL_INCLUDE_DIR "${NUVIO_OPENSSL_ROOT}/include" CACHE PATH "" FORCE)
 set(OPENSSL_SSL_LIBRARY "${NUVIO_OPENSSL_ROOT}/lib/libssl.a" CACHE FILEPATH "" FORCE)
 set(OPENSSL_CRYPTO_LIBRARY "${NUVIO_OPENSSL_ROOT}/lib/libcrypto.a" CACHE FILEPATH "" FORCE)
 set(OPENSSL_USE_STATIC_LIBS TRUE CACHE BOOL "" FORCE)
+# FindOpenSSL would otherwise ask the build machine's pkg-config about *its* OpenSSL and append
+# that package's private link libraries (jitterentropy, zstd) to the Android link line.
+set(CMAKE_DISABLE_FIND_PACKAGE_PkgConfig TRUE)
 
 add_subdirectory("${NUVIO_ENGINE_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/nuvio-engine-core")
 

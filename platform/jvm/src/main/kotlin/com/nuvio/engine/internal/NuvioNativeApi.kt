@@ -40,6 +40,7 @@ internal interface NuvioNativeApi {
         torrentId: String,
         fileIndex: Int?,
         filenameHint: String?,
+        flags: Int = 0,
     ): NativeCommandResult
     fun stopStream(handle: Long, streamId: String): NativeCommandResult
     fun removeTorrent(handle: Long, torrentId: String): NativeCommandResult

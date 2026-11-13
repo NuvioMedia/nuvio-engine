@@ -27,6 +27,8 @@ add_executable(
     ${PROJECT_SOURCE_DIR}/src/scheduler/stream_demand_plan.cpp
     retention_plan_test.cpp
     ${PROJECT_SOURCE_DIR}/src/scheduler/retention_plan.cpp
+    stream_throttle_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/scheduler/stream_throttle.cpp
     random_bytes_test.cpp
     ${PROJECT_SOURCE_DIR}/src/security/random_bytes.cpp
 )

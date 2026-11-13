@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <limits>
@@ -41,6 +42,13 @@ constexpr NativeSocket invalid_socket = -1;
 #endif
 
 constexpr std::size_t maximum_request_head_size = 16 * 1024;
+// The socket receive timeout only bounds one idle recv(); a client that sends a
+// byte every few seconds would otherwise hold a worker for hours.
+constexpr std::chrono::seconds request_head_deadline{10};
+// A response write must keep up with this rate (after a 30 s grace), so a client
+// that drains the socket one byte at a time cannot hold a worker either.
+constexpr std::chrono::seconds response_write_grace{30};
+constexpr std::size_t response_write_minimum_rate = 32 * 1024;
 
 class AtomicCounterGuard {
 public:
@@ -64,6 +72,16 @@ int socket_error() {
     return WSAGetLastError();
 #else
     return errno;
+#endif
+}
+
+// accept() failed because the process or system is out of descriptors or
+// memory. Retrying immediately would spin at 100% CPU until one is released.
+bool is_resource_exhaustion(const int error) {
+#if defined(_WIN32)
+    return error == WSAEMFILE || error == WSAENOBUFS;
+#else
+    return error == EMFILE || error == ENFILE || error == ENOBUFS || error == ENOMEM;
 #endif
 }
 
@@ -328,7 +346,14 @@ bool send_all(
     const std::stop_token stop_token
 ) {
     std::size_t offset = 0;
+    const auto write_deadline = std::chrono::steady_clock::now() + response_write_grace +
+        std::chrono::seconds(
+            static_cast<std::chrono::seconds::rep>(contents.size() / response_write_minimum_rate)
+        );
     while (offset < contents.size() && !stop_token.stop_requested()) {
+        if (std::chrono::steady_clock::now() >= write_deadline) {
+            return false;
+        }
         const auto remaining = contents.size() - offset;
 #if defined(_WIN32)
         const auto chunk = static_cast<int>(std::min(
@@ -373,7 +398,11 @@ std::optional<std::string> receive_request_head(
     std::string received;
     received.reserve(4096);
     std::array<char, 4096> buffer{};
+    const auto head_deadline = std::chrono::steady_clock::now() + request_head_deadline;
     while (!stop_token.stop_requested()) {
+        if (std::chrono::steady_clock::now() >= head_deadline) {
+            return std::nullopt;
+        }
 #if defined(_WIN32)
         const auto count = recv(socket, buffer.data(), static_cast<int>(buffer.size()), 0);
         if (count == SOCKET_ERROR || count == 0) {
@@ -542,8 +571,12 @@ struct LoopbackServer::Impl {
             }
             const auto client = accept(listening_socket, nullptr, nullptr);
             if (client == invalid_socket) {
+                const auto error = socket_error();
                 if (stopping.load()) {
                     return;
+                }
+                if (is_resource_exhaustion(error)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
                 continue;
             }

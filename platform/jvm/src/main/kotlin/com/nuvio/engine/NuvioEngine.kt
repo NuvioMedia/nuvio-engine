@@ -115,6 +115,7 @@ public class NuvioEngine private constructor(
         fileIndex: Int? = null,
         filenameHint: String? = null,
         minimumContiguousBytes: Long = 0L,
+        mode: NuvioStreamMode = NuvioStreamMode.PLAYBACK,
     ): NuvioStream {
         validateTorrentId(torrentId)
         require(fileIndex == null || fileIndex >= 0) { "file index must be non-negative" }
@@ -125,7 +126,7 @@ public class NuvioEngine private constructor(
             "minimum contiguous bytes must be between 0 and 64 MiB"
         }
         val event = awaitCommand(NuvioEventType.StreamPrepared) { handle ->
-            nativeApi.prepareStream(handle, torrentId, fileIndex, filenameHint)
+            nativeApi.prepareStream(handle, torrentId, fileIndex, filenameHint, mode.nativeFlags)
         }
         val stream = NuvioStream(
             id = event.streamId

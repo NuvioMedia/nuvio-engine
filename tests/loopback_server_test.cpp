@@ -264,3 +264,48 @@ NUVIO_TEST("loopback listener cancels an incomplete active request on stop") {
     close_client(client);
     NUVIO_EXPECT_TRUE(elapsed < std::chrono::seconds(1));
 }
+
+NUVIO_TEST("loopback listener frees the worker of a client that dribbles its request head") {
+    std::atomic_int handler_calls = 0;
+    nuvio::http::LoopbackServer server(
+        0,
+        [&](const nuvio::http::HttpRequest&,
+            const nuvio::http::LoopbackServer::Writer&,
+            const std::stop_token) {
+            ++handler_calls;
+        },
+        1,
+        2
+    );
+    const auto client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    NUVIO_EXPECT_TRUE(client != invalid_socket);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(server.port());
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    NUVIO_EXPECT_EQ(
+        connect(client, reinterpret_cast<const sockaddr*>(&address), sizeof(address)),
+        0
+    );
+    // One byte per second never trips the 5 s receive timeout; only the overall
+    // request head deadline (10 s) can end this connection.
+    const auto started = std::chrono::steady_clock::now();
+    bool dropped = false;
+    for (int second = 0; second < 20 && !dropped; ++second) {
+        const char byte = 'X';
+#if defined(MSG_NOSIGNAL)
+        constexpr int send_flags = MSG_NOSIGNAL;
+#else
+        constexpr int send_flags = 0;
+#endif
+        dropped = send(client, &byte, 1, send_flags) != 1;
+        if (!dropped) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    close_client(client);
+    NUVIO_EXPECT_TRUE(dropped);
+    NUVIO_EXPECT_TRUE(elapsed < std::chrono::seconds(16));
+    NUVIO_EXPECT_EQ(handler_calls.load(), 0);
+}

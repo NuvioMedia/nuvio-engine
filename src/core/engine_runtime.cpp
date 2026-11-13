@@ -11,6 +11,8 @@
 namespace nuvio::core {
 namespace {
 
+constexpr std::chrono::milliseconds alert_coalesce_interval{10};
+
 template <std::size_t Size>
 void copy_text(char (&destination)[Size], const std::string& source) {
     const auto length = std::min(source.size(), Size - 1);
@@ -35,6 +37,9 @@ EngineRuntime::EngineRuntime(
         backend_->set_wakeup([this] {
             wake();
         });
+        backend_->set_alert_wakeup([this] {
+            wake_for_alerts();
+        });
         worker_ = std::thread(&EngineRuntime::run, this);
     }
 }
@@ -43,6 +48,14 @@ void EngineRuntime::wake() {
     {
         std::lock_guard lock(command_mutex_);
         wake_pending_ = true;
+    }
+    command_ready_.notify_one();
+}
+
+void EngineRuntime::wake_for_alerts() {
+    {
+        std::lock_guard lock(command_mutex_);
+        alert_wake_pending_ = true;
     }
     command_ready_.notify_one();
 }
@@ -92,6 +105,7 @@ nuvio_engine_status EngineRuntime::prepare_stream(
     std::string torrent_id,
     const std::optional<std::size_t> requested_index,
     std::string filename_hint,
+    const std::uint32_t stream_flags,
     std::uint64_t& request_id
 ) {
     torrent::TorrentFileInfo selected_file;
@@ -122,6 +136,7 @@ nuvio_engine_status EngineRuntime::prepare_stream(
     command.type = CommandType::prepare_stream;
     command.torrent_id = std::move(torrent_id);
     command.file_index = static_cast<std::uint32_t>(selected_index);
+    command.stream_flags = stream_flags;
     command.file = std::move(selected_file);
     return enqueue(std::move(command), request_id);
 }
@@ -225,12 +240,33 @@ void EngineRuntime::run() {
     while (true) {
         std::optional<Command> command;
         bool shutdown_requested = false;
+        auto idle_wait = std::chrono::milliseconds(25);
+        try {
+            idle_wait = std::clamp(
+                backend_->idle_wait_hint(),
+                std::chrono::milliseconds(1),
+                std::chrono::milliseconds(1000)
+            );
+        } catch (...) {
+        }
         {
             std::unique_lock lock(command_mutex_);
-            command_ready_.wait_for(lock, std::chrono::milliseconds(25), [this] {
-                return stopping_ || wake_pending_ || !commands_.empty();
+            command_ready_.wait_for(lock, idle_wait, [this] {
+                return stopping_ || wake_pending_ || alert_wake_pending_ ||
+                    !commands_.empty();
             });
+            if (alert_wake_pending_ && !wake_pending_ && !stopping_ && commands_.empty()) {
+                // Alert-only wakeup: coalesce bursts of alerts into one pass per
+                // interval. Commands, HTTP requests and shutdown cut this short.
+                const auto earliest = last_iteration_end_ + alert_coalesce_interval;
+                if (std::chrono::steady_clock::now() < earliest) {
+                    command_ready_.wait_until(lock, earliest, [this] {
+                        return stopping_ || wake_pending_ || !commands_.empty();
+                    });
+                }
+            }
             wake_pending_ = false;
+            alert_wake_pending_ = false;
             if (!commands_.empty()) {
                 command = std::move(commands_.front());
                 commands_.pop_front();
@@ -261,6 +297,7 @@ void EngineRuntime::run() {
                 {},
             });
         }
+        last_iteration_end_ = std::chrono::steady_clock::now();
     }
 }
 
@@ -275,7 +312,8 @@ void EngineRuntime::process_command(Command command) {
                 command.request_id,
                 command.torrent_id,
                 command.file_index,
-                std::move(command.file)
+                std::move(command.file),
+                command.stream_flags
             );
             break;
         case CommandType::stop_stream:

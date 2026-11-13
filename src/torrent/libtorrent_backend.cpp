@@ -1,6 +1,7 @@
 #include "torrent/protocol_backend.hpp"
 #include "torrent/libtorrent_stream_bridge.hpp"
 #include "cache/disk_cache_manager.hpp"
+#include "scheduler/stream_throttle.hpp"
 #include "storage/atomic_file.hpp"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cctype>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -18,6 +20,10 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <libtorrent/alert.hpp>
 #include <libtorrent/alert_types.hpp>
@@ -48,13 +54,36 @@ constexpr int peer_reconnect_floor_seconds = 4;
 constexpr int piece_request_timeout_seconds = 4;
 constexpr int request_queue_seconds = 1;
 constexpr int maximum_outstanding_requests_per_peer = 64;
+// iOS blocks multicast (LSD) and the UPnP SSDP probe without the multicast
+// networking entitlement; they only produce failed sends there. NAT-PMP is
+// unicast and stays enabled.
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+constexpr bool multicast_discovery_enabled = false;
+#else
+constexpr bool multicast_discovery_enabled = true;
+#endif
+// Appended to libtorrent's default bootstrap node as additional backups.
+constexpr const char* dht_bootstrap_node_list =
+    "dht.libtorrent.org:25401,router.bittorrent.com:6881,"
+    "router.utorrent.com:6881,dht.transmissionbt.com:6881";
 constexpr int idle_session_tick_milliseconds = 500;
 constexpr int streaming_session_tick_milliseconds = 100;
+// iOS can kill the app without a shutdown call, so DHT state is saved often.
+constexpr std::chrono::seconds session_checkpoint_interval{60};
+constexpr std::chrono::seconds peer_info_interval{3};
+constexpr int minimum_torrent_connections = 20;
+// Download limit of a bulk (download) torrent while a playback stream is read.
+constexpr int throttled_bulk_download_limit = 256 * 1024;
+constexpr std::chrono::minutes disk_cache_rescan_interval{5};
 
+// Connection attempts each hold a file descriptor while pending, so the attempt
+// rate and the first-tracker-response burst stay small even for the fast
+// profile (iOS defaults to a soft limit of 256 descriptors).
 struct TorrentProfileSettings {
     int connection_limit;
     int connection_attempts_per_second;
     int connect_boost;
+    int max_out_request_queue;
 };
 
 TorrentProfileSettings torrent_profile_settings(
@@ -62,13 +91,14 @@ TorrentProfileSettings torrent_profile_settings(
 ) {
     switch (profile) {
     case NUVIO_ENGINE_TORRENT_PROFILE_SOFT:
-        return {35, 35, 35};
+        return {35, 20, 20, maximum_outstanding_requests_per_peer};
     case NUVIO_ENGINE_TORRENT_PROFILE_BALANCED:
-        return {120, 120, 120};
+        return {120, 30, 40, maximum_outstanding_requests_per_peer};
     case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
-        return {200, 200, 200};
+        // Deeper per-peer pipelines for bulk throughput on fast links.
+        return {200, 40, 60, 128};
     }
-    return {120, 120, 120};
+    return {120, 30, 40, maximum_outstanding_requests_per_peer};
 }
 
 enum class MetadataSource {
@@ -107,8 +137,14 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_str(lt::settings_pack::user_agent, "Nuvio Engine/0.1.6");
     settings.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:0,[::]:0");
     settings.set_bool(lt::settings_pack::enable_dht, true);
-    settings.set_bool(lt::settings_pack::enable_lsd, true);
-    settings.set_bool(lt::settings_pack::enable_upnp, true);
+    // Read-only (BEP 43): we answer no DHT queries, which saves battery and
+    // traffic on mobile. In libtorrent 2.0.12 the flag only stops incoming
+    // queries from being handled and marks outgoing ones with "ro"; get_peers
+    // lookups and announce_peer for our own torrents are unaffected.
+    settings.set_bool(lt::settings_pack::dht_read_only, true);
+    settings.set_str(lt::settings_pack::dht_bootstrap_nodes, dht_bootstrap_node_list);
+    settings.set_bool(lt::settings_pack::enable_lsd, multicast_discovery_enabled);
+    settings.set_bool(lt::settings_pack::enable_upnp, multicast_discovery_enabled);
     settings.set_bool(lt::settings_pack::enable_natpmp, true);
     settings.set_bool(lt::settings_pack::announce_to_all_tiers, true);
     settings.set_bool(lt::settings_pack::announce_to_all_trackers, true);
@@ -126,10 +162,7 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     settings.set_int(lt::settings_pack::request_queue_time, request_queue_seconds);
     settings.set_int(lt::settings_pack::tick_interval, idle_session_tick_milliseconds);
     settings.set_bool(lt::settings_pack::enable_outgoing_utp, false);
-    settings.set_int(
-        lt::settings_pack::max_out_request_queue,
-        maximum_outstanding_requests_per_peer
-    );
+    settings.set_int(lt::settings_pack::max_out_request_queue, profile.max_out_request_queue);
     settings.set_int(lt::settings_pack::whole_pieces_threshold, 0);
     if (!config.tls_ca_bundle_path.empty()) {
         settings.set_str(
@@ -139,16 +172,17 @@ lt::settings_pack make_settings(const ProtocolBackendConfig& config) {
     }
     settings.set_int(
         lt::settings_pack::alert_mask,
+        // Only categories whose alerts pop_events() handles. block_progress
+        // feeds the partial-block tracking of the stream bridge and
+        // piece_progress drives reads of completed pieces for bulk streams.
         lt::alert_category::error |
-            lt::alert_category::peer |
             lt::alert_category::storage |
             lt::alert_category::tracker |
             lt::alert_category::connect |
             lt::alert_category::status |
-            lt::alert_category::performance_warning |
             lt::alert_category::dht |
-            lt::alert_category::file_progress |
-            lt::alert_category::block_progress
+            lt::alert_category::block_progress |
+            lt::alert_category::piece_progress
     );
     if (config.upload_mode == NUVIO_ENGINE_UPLOAD_LIMITED) {
         settings.set_int(
@@ -256,6 +290,10 @@ public:
         const auto existing = handles_.find(id);
         if (existing != handles_.end() && existing->second.is_valid()) {
             activate_torrent(id, existing->second);
+            if (existing->second.status().has_metadata &&
+                !stream_bridge_->has_stream_for_torrent(id)) {
+                mark_warm(id);
+            }
             auto* context = existing->second.userdata().get<RequestContext>();
             if (context != nullptr) {
                 context->request_id = request_id;
@@ -309,6 +347,7 @@ public:
             }
         }
         params.save_path = prepare_payload_path(id).string();
+        disk_cache_dirty_ = true;
         params.flags |= lt::torrent_flags::upload_mode;
         params.flags &= ~lt::torrent_flags::auto_managed;
         params.flags &= ~lt::torrent_flags::paused;
@@ -333,7 +372,8 @@ public:
         const std::uint64_t request_id,
         const std::string& id,
         const std::uint32_t file_index,
-        TorrentFileInfo file
+        TorrentFileInfo file,
+        const std::uint32_t stream_flags
     ) override {
         const auto torrent = handles_.find(id);
         if (torrent == handles_.end() || !torrent->second.is_valid()) {
@@ -349,7 +389,7 @@ public:
         if (!metadata || file_index >= static_cast<std::uint32_t>(metadata->num_files())) {
             throw std::runtime_error("selected torrent file is unavailable");
         }
-        PendingPrepare prepare{request_id, file_index, std::move(file)};
+        PendingPrepare prepare{request_id, file_index, std::move(file), stream_flags};
         if (torrent->second.status().is_seeding) {
             queued_events_.push_back(prepared_event(torrent->second, id, prepare));
             return;
@@ -464,8 +504,45 @@ public:
     }
 
     void set_wakeup(std::function<void()> wake) override {
-        session_.set_alert_notify(wake);
         stream_bridge_->set_wakeup(std::move(wake));
+    }
+
+    void set_alert_wakeup(std::function<void()> wake) override {
+        session_.set_alert_notify(std::move(wake));
+    }
+
+    std::chrono::milliseconds idle_wait_hint() override {
+        constexpr std::chrono::milliseconds busy{25};
+        constexpr std::chrono::milliseconds idle_cap{250};
+        constexpr std::chrono::milliseconds minimum{5};
+        if (shutting_down_ || !queued_events_.empty() || !pending_.empty() ||
+            !pending_prepares_.empty() || !pending_removals_.empty() ||
+            !pending_resume_saves_.empty() || !pending_cache_unloads_.empty() ||
+            !pending_cache_removals_.empty() || !pending_disk_reclaims_.empty() ||
+            stream_bridge_->has_pending_work()) {
+            return busy;
+        }
+        // Nothing is streaming or in flight: sleep until the next due timer.
+        const auto now = std::chrono::steady_clock::now();
+        auto wait = idle_cap;
+        const auto consider = [&](const std::chrono::steady_clock::time_point due) {
+            wait = std::min(
+                wait,
+                std::chrono::duration_cast<std::chrono::milliseconds>(due - now)
+            );
+        };
+        consider(last_telemetry_request_ + std::chrono::seconds(1));
+        consider(last_resume_checkpoint_ + std::chrono::seconds(30));
+        consider(last_session_checkpoint_ + session_checkpoint_interval);
+        consider(next_disk_cache_check_);
+        if (warm_torrent_timeout_.count() != 0) {
+            for (const auto& [id, warm_since] : warm_since_) {
+                if (!quiesced_torrents_.contains(id)) {
+                    consider(std::max(warm_since + warm_torrent_timeout_, next_warm_check_));
+                }
+            }
+        }
+        return std::max(wait, minimum);
     }
 
     void shutdown() override {
@@ -532,6 +609,8 @@ public:
                 stream_bridge_->handle_block_finished(*block);
             } else if (const auto* piece = lt::alert_cast<lt::read_piece_alert>(alert)) {
                 stream_bridge_->handle_read_piece(*piece);
+            } else if (const auto* done = lt::alert_cast<lt::piece_finished_alert>(alert)) {
+                stream_bridge_->handle_piece_finished(*done);
             } else if (const auto* failed_hash = lt::alert_cast<lt::hash_failed_alert>(alert)) {
                 stream_bridge_->handle_hash_failed(*failed_hash);
             } else if (const auto* metadata = lt::alert_cast<lt::metadata_received_alert>(alert)) {
@@ -584,6 +663,7 @@ public:
         run_disk_cache_enforcement(events);
         request_telemetry_update();
         update_session_tick();
+        update_connection_caps();
         return events;
     }
 
@@ -734,6 +814,7 @@ private:
         std::uint64_t request_id;
         std::uint32_t file_index;
         TorrentFileInfo file;
+        std::uint32_t stream_flags = 0;
     };
 
     struct TorrentTelemetry {
@@ -800,6 +881,7 @@ private:
                 {},
             });
         }
+        connection_limit_ = torrent_profile_settings(config.torrent_profile).connection_limit;
         stream_bridge_ = std::make_unique<LibtorrentStreamBridge>(
             config.listen_port,
             config.memory_cache_capacity_bytes,
@@ -1084,7 +1166,11 @@ private:
         if (contents.size() > maximum_session_state_size) {
             throw std::runtime_error("DHT state exceeds configured size limit");
         }
+        if (saved_session_state_.has_value() && *saved_session_state_ == contents) {
+            return;
+        }
         storage::write_file_atomically(session_state_path_, contents);
+        saved_session_state_ = contents;
     }
 
     void run_periodic_checkpoints(std::vector<BackendEvent>& events) {
@@ -1104,7 +1190,7 @@ private:
             }
             last_resume_checkpoint_ = now;
         }
-        if (now - last_session_checkpoint_ >= std::chrono::minutes(5)) {
+        if (now - last_session_checkpoint_ >= session_checkpoint_interval) {
             try {
                 save_session_state();
             } catch (const std::exception& error) {
@@ -1129,13 +1215,48 @@ private:
             return;
         }
         session_.post_torrent_updates(lt::status_flags_t{});
+        // post_peer_info copies every peer's piece bitfield, so only request it
+        // for torrents that are being read, and at most every few seconds.
+        const auto poll_peers = now - last_peer_info_request_ >= peer_info_interval;
         for (const auto& [id, handle] : handles_) {
-            static_cast<void>(id);
-            if (handle.is_valid()) {
+            if (!handle.is_valid()) {
+                continue;
+            }
+            if (!stream_bridge_->has_active_reader(id)) {
+                clear_peer_telemetry(id);
+                continue;
+            }
+            if (poll_peers) {
                 handle.post_peer_info();
             }
         }
+        if (poll_peers) {
+            last_peer_info_request_ = now;
+        }
         last_telemetry_request_ = now;
+    }
+
+    // Peer-derived counters are only refreshed while a torrent has an active
+    // reader; zero them afterwards instead of reporting stale values.
+    void clear_peer_telemetry(const std::string& id) {
+        const auto found = telemetry_.find(id);
+        if (found == telemetry_.end()) {
+            return;
+        }
+        auto& telemetry = found->second;
+        telemetry.interested_peers = 0;
+        telemetry.unchoked_peers = 0;
+        telemetry.downloading_peers = 0;
+        telemetry.snubbed_peers = 0;
+        telemetry.pending_block_requests = 0;
+        telemetry.target_block_requests = 0;
+        telemetry.timed_out_block_requests = 0;
+        telemetry.connecting_peers = 0;
+        telemetry.handshaking_peers = 0;
+        telemetry.target_piece_peers = 0;
+        telemetry.target_piece_unchoked_peers = 0;
+        telemetry.target_piece_downloading_peers = 0;
+        telemetry.off_target_downloading_peers = 0;
     }
 
     void mark_warm(const std::string& id) {
@@ -1188,6 +1309,7 @@ private:
     void enforce_disk_cache(std::vector<BackendEvent>& events) {
         try {
             const auto stats = disk_cache_.enforce(protected_torrents());
+            note_disk_cache_scanned(std::chrono::steady_clock::now());
             last_disk_cache_error_.clear();
             if (stats.over_budget) {
                 request_cache_unloads(events, false);
@@ -1250,6 +1372,31 @@ private:
         }
     }
 
+    // The idle recursive payload scan is only needed when something may have
+    // changed the payload directories (downloaded bytes, added/removed torrents,
+    // released ranges), while over budget, or as a slow safety net for changes
+    // made outside the engine. The 5 s measurement while a reader is active is
+    // not gated: it is the only way to notice growth outside libtorrent's
+    // accounting and it reuses cached sizes of unprotected torrents.
+    [[nodiscard]] bool disk_cache_scan_needed(
+        const std::chrono::steady_clock::time_point now
+    ) {
+        const auto released = stream_bridge_->released_range_generation();
+        if (released != seen_release_generation_) {
+            seen_release_generation_ = released;
+            disk_cache_dirty_ = true;
+        }
+        const auto& stats = disk_cache_.stats();
+        return disk_cache_dirty_ || stats.over_budget ||
+            stats.used_bytes > stats.capacity_bytes ||
+            now - last_disk_cache_scan_ >= disk_cache_rescan_interval;
+    }
+
+    void note_disk_cache_scanned(const std::chrono::steady_clock::time_point now) {
+        disk_cache_dirty_ = false;
+        last_disk_cache_scan_ = now;
+    }
+
     void measure_disk_cache(
         const std::chrono::steady_clock::time_point now,
         std::vector<BackendEvent>& events
@@ -1260,6 +1407,7 @@ private:
         next_disk_cache_measurement_ = now + std::chrono::seconds(5);
         try {
             static_cast<void>(disk_cache_.measure(protected_torrents()));
+            note_disk_cache_scanned(now);
             last_disk_cache_error_.clear();
         } catch (const std::exception& error) {
             report_disk_cache_error(error.what(), events);
@@ -1281,6 +1429,9 @@ private:
             return;
         }
         next_disk_cache_check_ = now + std::chrono::seconds(30);
+        if (!disk_cache_scan_needed(now)) {
+            return;
+        }
         enforce_disk_cache(events);
     }
 
@@ -1347,7 +1498,11 @@ private:
             );
             telemetry.download_rate = nonnegative(status.download_payload_rate);
             telemetry.upload_rate = nonnegative(status.upload_payload_rate);
-            telemetry.total_download = nonnegative(status.total_payload_download);
+            const auto total_download = nonnegative(status.total_payload_download);
+            if (total_download != telemetry.total_download) {
+                disk_cache_dirty_ = true;
+            }
+            telemetry.total_download = total_download;
             telemetry.total_upload = nonnegative(status.total_payload_upload);
         }
     }
@@ -1521,6 +1676,85 @@ private:
         fast_session_tick_ = streaming;
     }
 
+    // connections_limit is shared by the whole session and libtorrent only
+    // rebalances it slowly (peer turnover). While several torrents have a
+    // stream, give each a fair share (never below 20). With one streaming
+    // torrent the per-torrent cap is removed so it keeps the full session limit.
+    // While a playback stream is actively read, torrents that only serve bulk
+    // (download) streams are throttled to a small connection cap and download
+    // limit so they cannot starve it; torrents serving a playback reader are
+    // never throttled. Runs on every poll, so a stream that stops, expires or
+    // goes idle restores the bulk torrents within one tick.
+    void update_connection_caps() {
+        if (shutting_down_) {
+            return;
+        }
+        std::vector<std::string> ids;
+        std::vector<scheduler::TorrentStreamLoad> loads;
+        ids.reserve(handles_.size());
+        loads.reserve(handles_.size());
+        for (const auto& [id, handle] : handles_) {
+            if (!handle.is_valid()) {
+                continue;
+            }
+            scheduler::TorrentStreamLoad load;
+            load.streaming = stream_bridge_->has_stream_for_torrent(id);
+            if (load.streaming) {
+                load.playback_reader = stream_bridge_->has_playback_reader(id);
+                load.bulk_only = stream_bridge_->has_bulk_streams_only(id);
+            }
+            ids.push_back(id);
+            loads.push_back(load);
+        }
+        scheduler::ThrottlePolicy policy;
+        policy.connection_limit = connection_limit_;
+        policy.minimum_connections = minimum_torrent_connections;
+        policy.throttled_download_limit = throttled_bulk_download_limit;
+        const auto budgets = scheduler::plan_torrent_budgets(loads, policy);
+        for (auto applied = applied_connection_caps_.begin();
+             applied != applied_connection_caps_.end();) {
+            applied = handles_.contains(applied->first)
+                ? std::next(applied)
+                : applied_connection_caps_.erase(applied);
+        }
+        for (auto applied = applied_download_limits_.begin();
+             applied != applied_download_limits_.end();) {
+            applied = handles_.contains(applied->first)
+                ? std::next(applied)
+                : applied_download_limits_.erase(applied);
+        }
+        for (std::size_t index = 0; index < ids.size(); ++index) {
+            const auto& id = ids[index];
+            const auto& handle = handles_.at(id);
+            // Both values are also stored in resume data, so the first pass over
+            // a handle always applies them (resetting anything persisted).
+            const auto cap = applied_connection_caps_.find(id);
+            if (cap == applied_connection_caps_.end() ||
+                cap->second != budgets[index].max_connections) {
+                try {
+                    handle.set_max_connections(budgets[index].max_connections);
+                    applied_connection_caps_.insert_or_assign(
+                        id,
+                        budgets[index].max_connections
+                    );
+                } catch (...) {
+                }
+            }
+            const auto limit = applied_download_limits_.find(id);
+            if (limit == applied_download_limits_.end() ||
+                limit->second != budgets[index].download_limit) {
+                try {
+                    handle.set_download_limit(budgets[index].download_limit);
+                    applied_download_limits_.insert_or_assign(
+                        id,
+                        budgets[index].download_limit
+                    );
+                } catch (...) {
+                }
+            }
+        }
+    }
+
     void announce_to_dht() {
         for (const auto& [id, handle] : handles_) {
             static_cast<void>(id);
@@ -1568,7 +1802,8 @@ private:
             handle,
             id,
             prepare.file_index,
-            prepare.file
+            prepare.file,
+            prepare.stream_flags
         );
         event.stream_id = stream.stream_id;
         event.stream_url = stream.url;
@@ -1612,6 +1847,7 @@ private:
     }
 
     void handle_added(const lt::add_torrent_alert& alert, std::vector<BackendEvent>& events) {
+        disk_cache_dirty_ = true;
         auto* context = alert.params.userdata.get<RequestContext>();
         const auto request_id = context == nullptr ? 0 : context->request_id;
         if (alert.error) {
@@ -1650,6 +1886,12 @@ private:
             }
         }
         events.push_back({BackendEventType::torrent_added, request_id, id, {}, {}});
+        // A torrent that is added but never streamed has no stream to stop, so
+        // nothing else would ever start its warm timer.
+        if (alert.handle.status().has_metadata &&
+            !stream_bridge_->has_stream_for_torrent(id)) {
+            mark_warm(id);
+        }
         if (alert.handle.status().has_metadata && context != nullptr && !context->metadata_emitted) {
             context->metadata_emitted = true;
             events.push_back(metadata_event(
@@ -1671,6 +1913,10 @@ private:
         std::vector<BackendEvent>& events
     ) {
         auto* context = alert.handle.userdata().get<RequestContext>();
+        const auto id = torrent_id(alert.handle);
+        if (!stream_bridge_->has_stream_for_torrent(id)) {
+            mark_warm(id);
+        }
         if (context != nullptr && context->metadata_emitted) {
             return;
         }
@@ -1764,6 +2010,7 @@ private:
         const lt::torrent_removed_alert& alert,
         std::vector<BackendEvent>& events
     ) {
+        disk_cache_dirty_ = true;
         auto* context = alert.userdata.get<RequestContext>();
         const auto id = context == nullptr || context->torrent_id.empty()
             ? torrent_id(alert.info_hashes)
@@ -1836,6 +2083,14 @@ private:
         std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_telemetry_request_ =
         std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    std::unordered_map<std::string, int> applied_connection_caps_;
+    std::unordered_map<std::string, int> applied_download_limits_;
+    std::optional<std::vector<char>> saved_session_state_;
+    bool disk_cache_dirty_ = true;
+    std::uint64_t seen_release_generation_ = 0;
+    std::chrono::steady_clock::time_point last_disk_cache_scan_{};
+    int connection_limit_ = 0;
+    std::chrono::steady_clock::time_point last_peer_info_request_{};
     std::chrono::steady_clock::time_point next_warm_check_{};
     std::chrono::steady_clock::time_point next_disk_cache_check_ =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(300);

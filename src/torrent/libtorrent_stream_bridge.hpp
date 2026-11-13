@@ -51,16 +51,26 @@ public:
         const lt::torrent_handle& handle,
         const std::string& torrent_id,
         std::uint32_t file_index,
-        const TorrentFileInfo& file
+        const TorrentFileInfo& file,
+        std::uint32_t stream_flags = 0
     );
     void set_wakeup(std::function<void()> wake);
     void poll();
+    [[nodiscard]] bool has_pending_work();
+    // Incremented whenever evicted piece ranges were released from payload files.
+    [[nodiscard]] std::uint64_t released_range_generation() const;
     [[nodiscard]] std::vector<StoppedStream> pop_expired_streams();
     void handle_read_piece(const lt::read_piece_alert& alert);
     void handle_block_finished(const lt::block_finished_alert& alert);
+    void handle_piece_finished(const lt::piece_finished_alert& alert);
     void handle_hash_failed(const lt::hash_failed_alert& alert);
     [[nodiscard]] std::string stop_stream(const std::string& stream_id);
     [[nodiscard]] bool has_stream_for_torrent(const std::string& torrent_id);
+    [[nodiscard]] bool has_active_reader(const std::string& torrent_id) const;
+    // A non-bulk (playback) stream of the torrent is being actively read.
+    [[nodiscard]] bool has_playback_reader(const std::string& torrent_id);
+    // The torrent has live streams and every one of them is a bulk stream.
+    [[nodiscard]] bool has_bulk_streams_only(const std::string& torrent_id);
     [[nodiscard]] std::vector<std::uint32_t> blocking_pieces(
         const std::string& torrent_id
     ) const;

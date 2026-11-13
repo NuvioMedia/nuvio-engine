@@ -133,3 +133,68 @@ NUVIO_TEST("retention clamps a read position past the end of the file") {
     NUVIO_EXPECT_TRUE(!contains(evictions, 99));
     NUVIO_EXPECT_TRUE(!contains(evictions, 95));
 }
+
+NUVIO_TEST("behind-only retention never evicts a piece at or after the reader cursor") {
+    // 100 pieces of 1 MiB, cursor in piece 50, everything downloaded and far
+    // over budget: only pieces fully behind the cursor may go, oldest first.
+    auto window = middle_window();
+    window.behind_bytes = 0;
+    window.edge_bytes = 0;
+    window.budget_bytes = 10 * mebibyte;
+    window.behind_only = true;
+    const auto retained = pieces(0, 99);
+    const auto evictions = nuvio::scheduler::plan_retention_evictions(
+        window,
+        retained,
+        {},
+        256
+    );
+    NUVIO_EXPECT_EQ(evictions.size(), std::size_t(50));
+    for (const auto piece : evictions) {
+        NUVIO_EXPECT_TRUE(piece < 50);
+    }
+    NUVIO_EXPECT_EQ(evictions.front(), std::uint32_t(0));
+    NUVIO_EXPECT_TRUE(position_of(evictions, 0) < position_of(evictions, 49));
+}
+
+NUVIO_TEST("behind-only retention keeps everything when the cursor is at the start") {
+    auto window = middle_window();
+    window.position = 0;
+    window.behind_bytes = 0;
+    window.edge_bytes = 0;
+    window.budget_bytes = 10 * mebibyte;
+    window.behind_only = true;
+    const auto retained = pieces(0, 99);
+    const auto evictions = nuvio::scheduler::plan_retention_evictions(
+        window,
+        retained,
+        {},
+        256
+    );
+    NUVIO_EXPECT_TRUE(evictions.empty());
+}
+
+NUVIO_TEST("behind-only retention still releases pieces outside the streamed file") {
+    auto window = middle_window();
+    window.file_offset = 10 * mebibyte;
+    window.file_size = 50 * mebibyte;
+    window.position = 25 * mebibyte;
+    window.budget_bytes = 40 * mebibyte;
+    window.behind_bytes = 0;
+    window.edge_bytes = 0;
+    window.behind_only = true;
+    const auto retained = pieces(0, 69);
+    const auto evictions = nuvio::scheduler::plan_retention_evictions(
+        window,
+        retained,
+        {},
+        256
+    );
+    NUVIO_EXPECT_EQ(evictions.size(), std::size_t(30));
+    // Position 25 MiB inside the file is absolute piece 35.
+    for (const auto piece : evictions) {
+        NUVIO_EXPECT_TRUE(piece < 10 || piece >= 60 || piece < 35);
+    }
+    NUVIO_EXPECT_TRUE(!contains(evictions, 35));
+    NUVIO_EXPECT_TRUE(!contains(evictions, 36));
+}
