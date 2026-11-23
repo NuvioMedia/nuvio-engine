@@ -40,7 +40,8 @@ public:
         std::uint16_t requested_port,
         std::uint64_t memory_capacity_bytes,
         std::uint64_t disk_capacity_bytes,
-        std::chrono::milliseconds inactivity_timeout
+        std::chrono::milliseconds inactivity_timeout,
+        bool piece_files
     );
     ~LibtorrentStreamBridge();
 

@@ -2,10 +2,12 @@
 #include "torrent/libtorrent_stream_bridge.hpp"
 #include "cache/disk_cache_manager.hpp"
 #include "storage/atomic_file.hpp"
+#include "storage/range_release.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <charconv>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -166,15 +168,50 @@ std::filesystem::path state_root(const ProtocolBackendConfig& config) {
     return std::filesystem::path(config.state_directory) / "nuvio-engine-state";
 }
 
+std::filesystem::path payload_root(const ProtocolBackendConfig& config) {
+    return std::filesystem::path(config.download_directory) / "payload";
+}
+
+void prepare_cache_root(const std::filesystem::path& root) {
+    std::filesystem::create_directories(root);
+    if (std::filesystem::symlink_status(root).type() != std::filesystem::file_type::directory) {
+        throw std::runtime_error("torrent payload root is not a real directory");
+    }
+}
+
+void discard_unverified_piece_files(lt::add_torrent_params& params) {
+    params.unfinished_pieces.clear();
+    const auto directory = lt::nuvio_piece_directory(params.save_path);
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        const auto name = entry.path().filename().string();
+        int index = -1;
+        const auto parsed = std::from_chars(name.data(), name.data() + name.size(), index);
+        if (parsed.ec != std::errc{} || parsed.ptr != name.data() + name.size() || index < 0) {
+            continue;
+        }
+        if (index < params.have_pieces.size() && params.have_pieces[lt::piece_index_t(index)] &&
+            entry.symlink_status().type() == std::filesystem::file_type::regular) {
+            continue;
+        }
+        std::filesystem::remove(entry.path());
+    }
+}
+
 struct SessionBootstrap {
     lt::session_params params;
     std::string diagnostic;
+    bool piece_files = false;
 };
 
 SessionBootstrap make_session_bootstrap(const ProtocolBackendConfig& config) {
     SessionBootstrap bootstrap{lt::session_params(make_settings(config)), {}};
 #if !defined(_WIN32)
-    bootstrap.params.disk_io_constructor = lt::posix_disk_io_constructor;
+    const auto root = payload_root(config);
+    prepare_cache_root(root);
+    bootstrap.piece_files = !storage::supports_range_release(root);
+    bootstrap.params.disk_io_constructor = bootstrap.piece_files
+        ? lt::nuvio_piece_disk_io_constructor
+        : lt::posix_disk_io_constructor;
 #endif
     try {
         const auto state = storage::read_bounded_file(
@@ -309,6 +346,9 @@ public:
             }
         }
         params.save_path = prepare_payload_path(id).string();
+        if (piece_files_) {
+            discard_unverified_piece_files(params);
+        }
         params.flags |= lt::torrent_flags::upload_mode;
         params.flags &= ~lt::torrent_flags::auto_managed;
         params.flags &= ~lt::torrent_flags::paused;
@@ -496,8 +536,8 @@ public:
             if (torrent != handles_.end() && !pending_removals_.contains(id)) {
                 request_resume_save(
                     torrent->second,
-                    lt::torrent_handle::only_if_modified |
-                        lt::torrent_handle::save_info_dict
+                    piece_files_ ? lt::torrent_handle::save_info_dict
+                        : lt::torrent_handle::only_if_modified | lt::torrent_handle::save_info_dict
                 );
             }
         }
@@ -785,9 +825,8 @@ private:
         : state_root_(state_root(config)),
           resume_directory_(state_root_ / "resume"),
           session_state_path_(state_root_ / "session.dht"),
-          payload_directory_(
-              std::filesystem::path(config.download_directory) / "payload"
-          ),
+          payload_directory_(payload_root(config)),
+          piece_files_(bootstrap.piece_files),
           warm_torrent_timeout_(config.warm_torrent_timeout_milliseconds),
           disk_cache_(payload_directory_, config.disk_cache_capacity_bytes),
           session_(std::move(bootstrap.params)) {
@@ -804,7 +843,8 @@ private:
             config.listen_port,
             config.memory_cache_capacity_bytes,
             config.disk_cache_capacity_bytes,
-            std::chrono::milliseconds(config.stream_inactivity_timeout_milliseconds)
+            std::chrono::milliseconds(config.stream_inactivity_timeout_milliseconds),
+            piece_files_
         );
     }
 
@@ -823,7 +863,7 @@ private:
     }
 
     [[nodiscard]] std::filesystem::path resume_path(const std::string& id) const {
-        return resume_directory_ / (id + ".resume");
+        return resume_directory_ / (id + (piece_files_ ? ".pieces.resume" : ".resume"));
     }
 
     [[nodiscard]] std::filesystem::path prepare_payload_path(
@@ -832,21 +872,8 @@ private:
         if (!is_canonical_torrent_id(id)) {
             throw std::runtime_error("payload path requires a canonical info hash");
         }
+        prepare_cache_root(payload_directory_);
         std::error_code error;
-        std::filesystem::create_directories(payload_directory_, error);
-        if (error) {
-            throw std::system_error(error, "create torrent payload root");
-        }
-        const auto root_status = std::filesystem::symlink_status(
-            payload_directory_,
-            error
-        );
-        if (error) {
-            throw std::system_error(error, "inspect torrent payload root");
-        }
-        if (root_status.type() != std::filesystem::file_type::directory) {
-            throw std::runtime_error("torrent payload root is not a real directory");
-        }
         const auto target = payload_directory_ / id;
         const auto target_status = std::filesystem::symlink_status(target, error);
         const auto missing = error == std::errc::no_such_file_or_directory ||
@@ -875,6 +902,25 @@ private:
                         "torrent payload directory creation was replaced"
                     );
                 }
+            }
+        }
+        if (piece_files_) {
+            const auto pieces = std::filesystem::path(lt::nuvio_piece_directory(target.string()));
+            const auto status = std::filesystem::symlink_status(pieces, error);
+            if (error == std::errc::no_such_file_or_directory ||
+                status.type() == std::filesystem::file_type::not_found) {
+                error.clear();
+                // The previous layout is cache data and cannot be read as piece files.
+                std::filesystem::remove_all(target, error);
+                if (error) {
+                    throw std::system_error(error, "remove legacy torrent cache");
+                }
+                std::filesystem::create_directories(pieces, error);
+            } else if (!error && status.type() != std::filesystem::file_type::directory) {
+                throw std::runtime_error("torrent piece path is not a real directory");
+            }
+            if (error) {
+                throw std::system_error(error, "prepare torrent piece directory");
             }
         }
         return target;
@@ -1814,6 +1860,7 @@ private:
     std::filesystem::path resume_directory_;
     std::filesystem::path session_state_path_;
     std::filesystem::path payload_directory_;
+    const bool piece_files_;
     const std::chrono::milliseconds warm_torrent_timeout_;
     cache::DiskCacheManager disk_cache_;
     std::unordered_map<RequestContext*, std::unique_ptr<RequestContext>> pending_;
