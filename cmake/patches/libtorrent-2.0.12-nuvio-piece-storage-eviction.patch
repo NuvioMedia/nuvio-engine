@@ -1,0 +1,24 @@
+diff --git a/src/torrent.cpp b/src/torrent.cpp
+--- a/src/torrent.cpp
++++ b/src/torrent.cpp
+@@ -5440,6 +5440,19 @@
+ 			if (piece < piece_index_t(0) || piece >= m_torrent_file->end_piece()) continue;
+-			if (!m_picker->have_piece(piece)) continue;
+ 			if (std::any_of(m_time_critical_pieces.begin(), m_time_critical_pieces.end()
+ 				, [piece](time_critical_piece const& p) { return p.piece == piece; }))
+ 				continue;
++			if (!m_picker->have_piece(piece))
++			{
++				// Pieces left behind by a seek can contain blocks on disk without
++				// having a verified hash. Forget them before the piece file is removed.
++				piece_picker::downloading_piece info;
++				m_picker->piece_info(piece, info);
++				if (m_picker->piece_priority(piece) != dont_download || info.finished == 0
++					|| info.requested || info.writing || info.hashing || info.locked
++					|| info.passed_hash_check)
++					continue;
++				m_picker->restore_piece(piece);
++				evicted = true;
++				continue;
++			}
+ 			for (auto* p : m_connections)
