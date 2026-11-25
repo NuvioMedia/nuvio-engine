@@ -78,21 +78,28 @@ if [[ "$(git -C "$libtorrent_source/deps/try_signal" rev-parse HEAD)" != "$try_s
 fi
 
 patched_file_states=(
+    'include/libtorrent/aux_/posix_storage.hpp:79e0075f726713d2b424e4aa7eee9ad095a99c71b6e6212df58c2bf843702397:29152aa3ce849ff81d95ae2387e21129ede14a602065c5338cad90f0cdc555f1'
     'include/libtorrent/piece_picker.hpp:6ae3439ee94a0511b550874e49abd56f5df261d662bb6f1b63d0c674908b0851:939c614a2cdb77741ae278bae573c1866d8df461f93cff87b4253ca2df6cb903'
+    'include/libtorrent/posix_disk_io.hpp:364729e6ef187087c617d9e90aa5496874d8cf3f4a50f81b8d5c2c837409f979:1f81a735a9ef057e98c5fe0f49d4125a6f28bf3e759237c713732396f0c2b23d'
     'include/libtorrent/settings_pack.hpp:101e5bd1561765eedfe498e753cc23cb66611bf8a47b66455497fb91e7514d67:f0a2af9a8045f0c6cad24e37115db93a760c5121806740e1d321ae32bf027de2'
     'include/libtorrent/torrent.hpp:f9da4c3df6fa52718106e5862f8e6df85bb614b2d8395e584830ff539ecb92c3:21c130c70ce6ab6ef533f5bb6f837024ce996a2173527267901b3d10a160a0ce'
     'include/libtorrent/torrent_handle.hpp:97638a77492f9c9a11e40e82eeb522dd9bab0e3a1ff6596be0594bcaa8ce8019:f8f11b2844ce59793dd1028a1402f5044d392defaa66831b6302f0c1d67fec3c'
     'src/bt_peer_connection.cpp:390a7c9a1c91babc0227a657979773662dfdea2e1f0eab03e9d07f1bc2280448:7be7682e3177ca84e749f21d9c2dd6db65f301559ba7f44aa06ae87c4d8c08c5'
     'src/enum_net.cpp:4e97a556d64a57df6176bada627526e1f8a00ef8c7ad0d86ca6d06b52a8301b7:19db38bc56229b36e6533e0aebb337fc834d7930e4c243f6d59c21acbd20f614'
     'src/piece_picker.cpp:d82140e1d9c4b3ba4a93a4ad7106c015d8a83e0f325b519acadc019cd29e7a6c:b2190079cd728014553690aed225e46e5ae66105bfebdc46cb028ad74c4246ba'
-    'src/posix_storage.cpp:6c139d9e1834d8e9ebedbcf21b3e15781c955d94836c8bee35f02f20a9b2ffc9:ca8a9732d774945ed1af67c7d9477eabcaf67f8f02054d74138e401440e3e19e'
+    'src/posix_disk_io.cpp:4eced31ddff500eafa0dd9796150cd123413facba1021d07056764ae2c8487ea:50542102b0d345fbc5685f6b7285611fe9685278dcfdd3c27713b478a99933c2'
+    'src/posix_storage.cpp:6c139d9e1834d8e9ebedbcf21b3e15781c955d94836c8bee35f02f20a9b2ffc9:8216058c51305acde4d846783e334983223a81959f181f54a9629390c30dc62b'
     'src/session_impl.cpp:e33778939a03634f7ca588752f924afcdf790ac48ddd2a127af71e00f34d1c65:01da1fa6c7ffd9f9e189d461b2195ef1498ffce487fab14f6bed05b0186329b0'
     'src/settings_pack.cpp:059759d20da14fc8ada6177df77562addda1a033ef6fe08edf631f757dfd9bf4:7e938dba3b5d3d0184b1446e6c8e82406d1196f241cc60414ca6224bec682a10'
-    'src/torrent.cpp:d0b8d64c54583cb9287d20aaf5ea5bc2e85cbf0caa5d5c9df42f40c77187d185:eb4e11a05a73c63d5390401d0fa451fb9066ac0e00bac97fe41da8b8f7156d41'
+    'src/torrent.cpp:d0b8d64c54583cb9287d20aaf5ea5bc2e85cbf0caa5d5c9df42f40c77187d185:40ac20156ad7c72c03dfe8b45eb9a5c67b7f35b571bb7078e62bf80dbad45d62'
     'src/torrent_handle.cpp:9f8c985b4bff1fbf160fa8a68a4e808eb9a60caf10b853c1b29d08bea7fcb5fe:ee7370dc94982be9868afc6572ca41d5f98ca744ffcaff64fe7ed31e823598a2'
     'src/ut_metadata.cpp:aaea791fac2c0ec3caed5b2f153650ef41c7342a4e13b43f28970a87160ca48c:1661e97d9821ecb8676d930dd43db1ded330459335d9244c57f13fc3c7cffe88'
 )
 late_patched_files=(
+    include/libtorrent/aux_/posix_storage.hpp
+    include/libtorrent/posix_disk_io.hpp
+    src/posix_disk_io.cpp
+    src/posix_storage.cpp
     src/ut_metadata.cpp
 )
 legacy_patched_hashes=(
@@ -106,6 +113,8 @@ legacy_patched_hashes=(
     'src/torrent.cpp:47f9596d17153e8527871f3cb7172948e7aa879c576de3722876afd0ab0def04'
     'src/torrent.cpp:7bfc67cc542e10773989f41e7c910840d1823d88eaa6f34d9c79cfcf8ebc30a1'
     'src/torrent.cpp:c9004eeb38e724110ccb3cf8c2ebd15ff692d5feaff6ee104b7d42e18da177f1'
+    'src/torrent.cpp:eb4e11a05a73c63d5390401d0fa451fb9066ac0e00bac97fe41da8b8f7156d41'
+    'src/posix_storage.cpp:4dc499475da7d7d1191b0be62f9bf4ce2eb4ac0034d8fa2739450571748d9e31'
     'src/torrent_handle.cpp:65925b73cfd51c8ff1d459dea306acbb9aed1960a0bc277affdf28bb24ed6bf4'
 )
 source_state=

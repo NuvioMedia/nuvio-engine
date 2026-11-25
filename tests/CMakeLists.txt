@@ -34,6 +34,22 @@ add_executable(
 )
 
 target_link_libraries(nuvio_engine_tests PRIVATE Nuvio::Engine)
+if(NUVIO_ENGINE_ENABLE_LIBTORRENT)
+    target_sources(nuvio_engine_tests PRIVATE libtorrent_piece_storage_test.cpp)
+    target_link_libraries(nuvio_engine_tests PRIVATE torrent-rasterbar)
+    if(APPLE)
+        target_sources(
+            nuvio_engine_tests
+            PRIVATE ${PROJECT_SOURCE_DIR}/src/security/apple_trust.cpp
+        )
+        target_link_libraries(
+            nuvio_engine_tests
+            PRIVATE
+                OpenSSL::SSL
+                "${NUVIO_SECURITY_FRAMEWORK}"
+        )
+    endif()
+endif()
 target_compile_features(nuvio_engine_tests PRIVATE cxx_std_20)
 target_include_directories(
     nuvio_engine_tests

@@ -42,6 +42,7 @@ public:
         std::uint64_t memory_capacity_bytes,
         std::uint64_t disk_capacity_bytes,
         std::chrono::milliseconds inactivity_timeout,
+        bool piece_files,
         std::shared_ptr<storage::MemoryPieceStore> memory_store = {}
     );
     ~LibtorrentStreamBridge();

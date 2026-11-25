@@ -1,14 +1,14 @@
 diff --git a/src/posix_storage.cpp b/src/posix_storage.cpp
 --- a/src/posix_storage.cpp
 +++ b/src/posix_storage.cpp
-@@ -43,0 +44,6 @@ POSSIBILITY OF SUCH DAMAGE.
+@@ -47,0 +48,6 @@ POSSIBILITY OF SUCH DAMAGE.
 +#include <io.h>
 +#ifndef WIN32_LEAN_AND_MEAN
 +#define WIN32_LEAN_AND_MEAN
 +#endif
 +#include <windows.h>
 +#include <winioctl.h>
-@@ -60,0 +67,14 @@ namespace aux {
+@@ -74,0 +81,14 @@ namespace aux {
 +#ifdef TORRENT_WINDOWS
 +	namespace {
 +
@@ -23,5 +23,5 @@ diff --git a/src/posix_storage.cpp b/src/posix_storage.cpp
 +	}
 +#endif
 +
-@@ -491,0 +512 @@ namespace aux {
+@@ -566,0 +587 @@ namespace aux {
 +				if (f != nullptr) nuvio_set_sparse(f);

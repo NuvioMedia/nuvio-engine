@@ -1,0 +1,166 @@
+diff --git a/include/libtorrent/aux_/posix_storage.hpp b/include/libtorrent/aux_/posix_storage.hpp
+index ac626f3..0f5f5df 100644
+--- a/include/libtorrent/aux_/posix_storage.hpp
++++ b/include/libtorrent/aux_/posix_storage.hpp
+@@ -56 +56 @@ namespace aux {
+-		explicit posix_storage(storage_params const& p);
++		explicit posix_storage(storage_params const& p, bool piece_files = false);
+@@ -92 +92 @@ namespace aux {
+-			, storage_error& ec);
++			, storage_error& ec, piece_index_t piece = piece_index_t{-1});
+@@ -100,0 +101 @@ namespace aux {
++		bool const m_piece_files;
+diff --git a/include/libtorrent/posix_disk_io.hpp b/include/libtorrent/posix_disk_io.hpp
+index 487ac41..1583182 100644
+--- a/include/libtorrent/posix_disk_io.hpp
++++ b/include/libtorrent/posix_disk_io.hpp
+@@ -37,0 +38 @@ POSSIBILITY OF SUCH DAMAGE.
++#include "libtorrent/units.hpp"
+@@ -39,0 +41 @@ POSSIBILITY OF SUCH DAMAGE.
++#include <string>
+@@ -51,0 +54,4 @@ namespace libtorrent {
++	TORRENT_EXPORT std::unique_ptr<disk_interface> nuvio_piece_disk_io_constructor(
++		io_context& ios, settings_interface const&, counters& cnt);
++	TORRENT_EXPORT std::string nuvio_piece_directory(std::string const& save_path);
++	TORRENT_EXPORT std::string nuvio_piece_path(std::string const& save_path, piece_index_t piece);
+diff --git a/src/posix_disk_io.cpp b/src/posix_disk_io.cpp
+index 99a74a4..b8848d1 100644
+--- a/src/posix_disk_io.cpp
++++ b/src/posix_disk_io.cpp
+@@ -64 +64 @@ namespace {
+-		posix_disk_io(io_context& ios, settings_interface const& sett, counters& cnt)
++		posix_disk_io(io_context& ios, settings_interface const& sett, counters& cnt, bool const piece_files = false)
+@@ -68,0 +69 @@ namespace {
++			, m_piece_files(piece_files)
+@@ -84 +85 @@ namespace {
+-			auto storage = std::make_unique<posix_storage>(params);
++			auto storage = std::make_unique<posix_storage>(params, m_piece_files);
+@@ -394,0 +396 @@ namespace {
++		bool const m_piece_files;
+@@ -401,0 +404,6 @@ namespace {
++
++	std::unique_ptr<disk_interface> nuvio_piece_disk_io_constructor(
++		io_context& ios, settings_interface const& sett, counters& cnt)
++	{
++		return std::make_unique<posix_disk_io>(ios, sett, cnt, true);
++	}
+diff --git a/src/posix_storage.cpp b/src/posix_storage.cpp
+index 561e825..48ff8d4 100644
+--- a/src/posix_storage.cpp
++++ b/src/posix_storage.cpp
+@@ -40,0 +41 @@ POSSIBILITY OF SUCH DAMAGE.
++#include "libtorrent/aux_/directory.hpp"
+@@ -41,0 +43,3 @@ POSSIBILITY OF SUCH DAMAGE.
++#include "libtorrent/add_torrent_params.hpp"
++#include "libtorrent/posix_disk_io.hpp"
++#include "libtorrent/session_handle.hpp"
+@@ -58,0 +63,10 @@ namespace libtorrent {
++	std::string nuvio_piece_directory(std::string const& save_path)
++	{
++		return combine_path(save_path, ".nuvio-pieces-v1");
++	}
++
++	std::string nuvio_piece_path(std::string const& save_path, piece_index_t const piece)
++	{
++		return combine_path(nuvio_piece_directory(save_path), std::to_string(static_cast<int>(piece)));
++	}
++
+@@ -61 +75 @@ namespace aux {
+-	posix_storage::posix_storage(storage_params const& p)
++	posix_storage::posix_storage(storage_params const& p, bool const piece_files)
+@@ -63,0 +78 @@ namespace aux {
++		, m_piece_files(piece_files)
+@@ -90,0 +106 @@ namespace aux {
++		if (m_piece_files) return;
+@@ -174 +190 @@ namespace aux {
+-			, [this](file_index_t const file_index
++			, [this, piece](file_index_t const file_index
+@@ -181 +197 @@ namespace aux {
+-			if (file_index < m_file_priority.end_index()
++			if (!m_piece_files && file_index < m_file_priority.end_index()
+@@ -201 +217 @@ namespace aux {
+-				, file_offset, ec);
++				, file_offset, ec, piece);
+@@ -234 +250 @@ namespace aux {
+-			, [this](file_index_t const file_index
++			, [this, piece](file_index_t const file_index
+@@ -244 +260 @@ namespace aux {
+-			if (file_index < m_file_priority.end_index()
++			if (!m_piece_files && file_index < m_file_priority.end_index()
+@@ -264 +280 @@ namespace aux {
+-				, file_offset, ec);
++				, file_offset, ec, piece);
+@@ -283 +299 @@ namespace aux {
+-			m_stat_cache.set_dirty(file_index);
++			if (!m_piece_files) m_stat_cache.set_dirty(file_index);
+@@ -289,0 +306,10 @@ namespace aux {
++		if (m_piece_files)
++		{
++			error_code ec;
++			for (directory entries(nuvio_piece_directory(m_save_path), ec); !ec && !entries.done(); entries.next(ec))
++			{
++				auto const name = entries.file();
++				if (name != "." && name != "..") return true;
++			}
++			return false;
++		}
+@@ -297,0 +324,21 @@ namespace aux {
++		if (m_piece_files)
++		{
++			for (piece_index_t piece{}; piece < rd.have_pieces.end_index(); ++piece)
++			{
++				if (!rd.have_pieces[piece]) continue;
++				if (piece >= files().end_piece()) return false;
++				int end = 0;
++				int required = 0;
++				for (auto const& slice : files().map_block(piece, 0, files().piece_size(piece)))
++				{
++					end += static_cast<int>(slice.size);
++					if (!files().pad_file_at(slice.file_index)) required = end;
++				}
++				if (required == 0) continue;
++				file_status status;
++				error_code size_error;
++				stat_file(nuvio_piece_path(m_save_path, piece), &status, size_error);
++				if (size_error || status.file_size < required) return false;
++			}
++			return true;
++		}
+@@ -313,0 +361,7 @@ namespace aux {
++		if (m_piece_files)
++		{
++			if (options & session_handle::delete_files)
++				remove_all(nuvio_piece_directory(m_save_path), error.ec);
++			if (error.ec) error.operation = operation_t::file_remove;
++			return;
++		}
+@@ -323,0 +378,6 @@ namespace aux {
++		if (m_piece_files)
++		{
++			ec.ec = error_code(boost::system::errc::operation_not_supported, generic_category());
++			ec.operation = operation_t::file_rename;
++			return {status_t::fatal_disk_error, m_save_path};
++		}
+@@ -341,0 +402,6 @@ namespace aux {
++		if (m_piece_files)
++		{
++			if (!m_mapped_files) m_mapped_files = std::make_unique<file_storage>(files());
++			m_mapped_files->rename_file(index, new_filename);
++			return;
++		}
+@@ -399,0 +466,6 @@ namespace aux {
++		if (m_piece_files)
++		{
++			create_directories(nuvio_piece_directory(m_save_path), ec.ec);
++			if (ec.ec) ec.operation = operation_t::mkdir;
++			return status_t::no_error;
++		}
+@@ -441 +513 @@ namespace aux {
+-		, std::int64_t const offset, storage_error& ec)
++		, std::int64_t offset, storage_error& ec, piece_index_t const piece)
+@@ -443 +515,4 @@ namespace aux {
+-		std::string const fn = files().file_path(idx, m_save_path);
++		std::string const fn = m_piece_files ? nuvio_piece_path(m_save_path, piece)
++			: files().file_path(idx, m_save_path);
++		if (m_piece_files)
++			offset += files().file_offset(idx) - std::int64_t(static_cast<int>(piece)) * files().piece_length();
