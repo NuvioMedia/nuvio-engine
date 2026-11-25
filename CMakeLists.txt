@@ -45,6 +45,7 @@ target_sources(
         src/scheduler/stream_demand_plan.cpp
         src/security/random_bytes.cpp
         src/storage/atomic_file.cpp
+        src/storage/memory_piece_store.cpp
         src/storage/payload_reader.cpp
         src/storage/range_release.cpp
         src/torrent/file_selection.cpp
@@ -58,6 +59,7 @@ if(NUVIO_ENGINE_ENABLE_LIBTORRENT)
         PRIVATE
             src/torrent/libtorrent_backend.cpp
             src/torrent/libtorrent_stream_bridge.cpp
+            src/torrent/memory_disk_io.cpp
     )
     target_link_libraries(nuvio_engine PRIVATE $<BUILD_INTERFACE:torrent-rasterbar>)
     target_compile_definitions(nuvio_engine PRIVATE NUVIO_ENGINE_HAS_LIBTORRENT=1)
@@ -154,6 +156,13 @@ if(NUVIO_ENGINE_BUILD_TESTS)
             nuvio_engine_tests
             PRIVATE NUVIO_ENGINE_EXPECT_LIBTORRENT=1
         )
+        target_sources(
+            nuvio_engine_tests
+            PRIVATE
+                tests/memory_disk_io_test.cpp
+                src/torrent/memory_disk_io.cpp
+        )
+        target_link_libraries(nuvio_engine_tests PRIVATE torrent-rasterbar)
     endif()
 endif()
 

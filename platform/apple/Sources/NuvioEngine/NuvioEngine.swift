@@ -604,6 +604,9 @@ private func createNativeHandle(configuration: NuvioEngineConfiguration) throws 
                 nativeConfiguration.disk_cache_capacity_bytes =
                     configuration.diskCacheCapacityBytes
                 nativeConfiguration.torrent_profile = configuration.torrentProfile.rawValue
+                nativeConfiguration.storage_mode = configuration.storageMode.rawValue
+                nativeConfiguration.memory_storage_capacity_bytes =
+                    configuration.memoryStorageCapacityBytes
                 nativeConfiguration.listen_port = configuration.listenPort
                 nativeConfiguration.upload_mode = upload.mode
                 nativeConfiguration.upload_limit_bytes_per_second = upload.limit

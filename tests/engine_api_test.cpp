@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -215,6 +216,11 @@ NUVIO_TEST("default configuration creates and destroys an engine handle") {
         config.torrent_profile,
         nuvio_engine_torrent_profile(NUVIO_ENGINE_TORRENT_PROFILE_BALANCED)
     );
+    NUVIO_EXPECT_EQ(
+        config.storage_mode,
+        nuvio_engine_storage_mode(NUVIO_ENGINE_STORAGE_DISK)
+    );
+    NUVIO_EXPECT_EQ(config.memory_storage_capacity_bytes, std::uint64_t(256) * 1024 * 1024);
     directories.apply(config);
 
     nuvio_engine* engine = nullptr;
@@ -261,6 +267,59 @@ NUVIO_TEST("invalid torrent profile is rejected") {
         NUVIO_ENGINE_STATUS_INVALID_ARGUMENT
     );
     NUVIO_EXPECT_TRUE(engine == nullptr);
+}
+
+NUVIO_TEST("invalid storage mode is rejected") {
+    EngineTestDirectories directories;
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    config.storage_mode = 7;
+
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(
+        nuvio_engine_create(&config, &engine),
+        NUVIO_ENGINE_STATUS_INVALID_ARGUMENT
+    );
+    NUVIO_EXPECT_TRUE(engine == nullptr);
+}
+
+NUVIO_TEST("memory storage requires a positive capacity") {
+    EngineTestDirectories directories;
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    config.storage_mode = NUVIO_ENGINE_STORAGE_MEMORY;
+    config.memory_storage_capacity_bytes = 0;
+
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(
+        nuvio_engine_create(&config, &engine),
+        NUVIO_ENGINE_STATUS_INVALID_ARGUMENT
+    );
+    NUVIO_EXPECT_TRUE(engine == nullptr);
+
+    config.memory_storage_capacity_bytes = 64 * 1024 * 1024;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+    NUVIO_EXPECT_TRUE(engine != nullptr);
+    nuvio_engine_destroy(engine);
+}
+
+NUVIO_TEST("memory storage without a capacity field uses the default capacity") {
+    EngineTestDirectories directories;
+    nuvio_engine_config config{};
+    nuvio_engine_config_init_sized(
+        &config,
+        static_cast<std::uint32_t>(offsetof(nuvio_engine_config, memory_storage_capacity_bytes))
+    );
+    directories.apply(config);
+    config.storage_mode = NUVIO_ENGINE_STORAGE_MEMORY;
+    NUVIO_EXPECT_EQ(config.memory_storage_capacity_bytes, std::uint64_t(0));
+
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+    NUVIO_EXPECT_TRUE(engine != nullptr);
+    nuvio_engine_destroy(engine);
 }
 
 NUVIO_TEST("empty explicit TLS CA bundle path is rejected") {

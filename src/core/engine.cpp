@@ -26,6 +26,8 @@ struct nuvio_engine {
     std::uint32_t stream_inactivity_timeout_milliseconds;
     std::uint32_t warm_torrent_timeout_milliseconds;
     nuvio_engine_torrent_profile torrent_profile;
+    nuvio_engine_storage_mode storage_mode;
+    std::uint64_t memory_storage_capacity_bytes;
     std::unique_ptr<nuvio::core::EngineRuntime> runtime;
 };
 
@@ -33,6 +35,7 @@ namespace {
 
 constexpr std::uint64_t default_memory_cache_capacity = 64ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t default_disk_cache_capacity = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t default_memory_storage_capacity = 256ULL * 1024ULL * 1024ULL;
 constexpr std::uint32_t default_stream_inactivity_timeout_milliseconds = 30'000;
 constexpr std::uint32_t default_warm_torrent_timeout_milliseconds = 60'000;
 constexpr nuvio_engine_torrent_profile default_torrent_profile =
@@ -46,7 +49,9 @@ constexpr std::size_t config_v3_size =
 constexpr std::size_t config_v4_size =
     offsetof(nuvio_engine_config, tls_ca_bundle_path) + sizeof(const char*);
 constexpr std::size_t config_v5_size =
-    offsetof(nuvio_engine_config, reserved_3) + sizeof(std::uint32_t);
+    offsetof(nuvio_engine_config, storage_mode) + sizeof(nuvio_engine_storage_mode);
+constexpr std::size_t config_v6_size =
+    offsetof(nuvio_engine_config, memory_storage_capacity_bytes) + sizeof(std::uint64_t);
 constexpr std::size_t torrent_request_v1_size =
     offsetof(nuvio_engine_torrent_request, magnet_uri) + sizeof(const char*);
 constexpr std::size_t torrent_request_v2_size =
@@ -91,6 +96,15 @@ bool valid_torrent_profile(const nuvio_engine_torrent_profile profile) {
     case NUVIO_ENGINE_TORRENT_PROFILE_SOFT:
     case NUVIO_ENGINE_TORRENT_PROFILE_BALANCED:
     case NUVIO_ENGINE_TORRENT_PROFILE_FAST:
+        return true;
+    }
+    return false;
+}
+
+bool valid_storage_mode(const nuvio_engine_storage_mode mode) {
+    switch (mode) {
+    case NUVIO_ENGINE_STORAGE_DISK:
+    case NUVIO_ENGINE_STORAGE_MEMORY:
         return true;
     }
     return false;
@@ -211,6 +225,10 @@ void nuvio_engine_config_init_sized(
     }
     if (struct_size >= config_v5_size) {
         config->torrent_profile = default_torrent_profile;
+        config->storage_mode = NUVIO_ENGINE_STORAGE_DISK;
+    }
+    if (struct_size >= config_v6_size) {
+        config->memory_storage_capacity_bytes = default_memory_storage_capacity;
     }
 }
 
@@ -299,6 +317,18 @@ nuvio_engine_status nuvio_engine_create(
     if (!valid_torrent_profile(torrent_profile)) {
         return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
     }
+    const auto storage_mode = config->struct_size >= config_v5_size
+        ? config->storage_mode
+        : NUVIO_ENGINE_STORAGE_DISK;
+    if (!valid_storage_mode(storage_mode)) {
+        return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
+    }
+    const auto memory_storage_capacity = config->struct_size >= config_v6_size
+        ? config->memory_storage_capacity_bytes
+        : default_memory_storage_capacity;
+    if (storage_mode == NUVIO_ENGINE_STORAGE_MEMORY && memory_storage_capacity == 0) {
+        return NUVIO_ENGINE_STATUS_INVALID_ARGUMENT;
+    }
 
     try {
         const auto stream_inactivity_timeout = config->struct_size >= config_v2_size
@@ -330,6 +360,8 @@ nuvio_engine_status nuvio_engine_create(
             stream_inactivity_timeout,
             warm_torrent_timeout,
             torrent_profile,
+            storage_mode,
+            memory_storage_capacity,
             std::make_unique<nuvio::core::EngineRuntime>(
                 nuvio::torrent::create_protocol_backend({
                     config->upload_mode,
@@ -343,6 +375,8 @@ nuvio_engine_status nuvio_engine_create(
                     warm_torrent_timeout,
                     torrent_profile,
                     std::move(tls_ca_bundle_path),
+                    storage_mode,
+                    memory_storage_capacity,
                 }),
                 config->cache_directory
             ),

@@ -283,3 +283,80 @@ NUVIO_TEST("reclaim unloads a stopped torrent before evicting its payload") {
     NUVIO_EXPECT_EQ(stats.disk_cache_protected_bytes, std::uint64_t(0));
     nuvio_engine_destroy(engine);
 }
+
+NUVIO_TEST("shutdown trims payload of a streamed torrent to the disk cache budget") {
+    CachePolicyDirectories directories;
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    config.disk_cache_capacity_bytes = 3;
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+
+    const auto torrent_id = add_torrent(engine, torrent_data("test.bin", 4));
+    const auto payload = directories.payload(torrent_id);
+    write_payload(payload, "test.bin");
+    static_cast<void>(prepare_stream(engine, torrent_id));
+    nuvio_engine_destroy(engine);
+
+    NUVIO_EXPECT_TRUE(!std::filesystem::exists(payload));
+    NUVIO_EXPECT_TRUE(std::filesystem::is_regular_file(directories.resume(torrent_id)));
+}
+
+NUVIO_TEST("shutdown keeps payload that fits the disk cache budget") {
+    CachePolicyDirectories directories;
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    config.disk_cache_capacity_bytes = 1024 * 1024;
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+
+    const auto torrent_id = add_torrent(engine, torrent_data("test.bin", 4));
+    const auto payload = directories.payload(torrent_id);
+    write_payload(payload, "test.bin");
+    static_cast<void>(prepare_stream(engine, torrent_id));
+    nuvio_engine_destroy(engine);
+
+    NUVIO_EXPECT_TRUE(std::filesystem::is_regular_file(payload / "test.bin"));
+}
+
+NUVIO_TEST("memory storage streams a torrent without creating payload files") {
+    CachePolicyDirectories directories;
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    config.storage_mode = NUVIO_ENGINE_STORAGE_MEMORY;
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+
+    const auto torrent_id = add_torrent(engine, torrent_data("test.bin", 4));
+    static_cast<void>(prepare_stream(engine, torrent_id));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const auto payload = directories.payload(torrent_id);
+    NUVIO_EXPECT_TRUE(!std::filesystem::exists(payload / "test.bin"));
+    nuvio_engine_destroy(engine);
+    NUVIO_EXPECT_TRUE(!std::filesystem::exists(payload));
+}
+
+NUVIO_TEST("memory storage purges payload left by disk storage") {
+    CachePolicyDirectories directories;
+    const std::string torrent_id = "13ade5f13f4e7ce4021a3cc82f72e504b9ef35ac";
+    write_payload(directories.payload(torrent_id), "test.bin");
+    nuvio_engine_config config;
+    nuvio_engine_config_init(&config);
+    directories.apply(config);
+    config.storage_mode = NUVIO_ENGINE_STORAGE_MEMORY;
+    nuvio_engine* engine = nullptr;
+    NUVIO_EXPECT_EQ(nuvio_engine_create(&config, &engine), NUVIO_ENGINE_STATUS_OK);
+
+    for (int attempt = 0; attempt < 300; ++attempt) {
+        if (!std::filesystem::exists(directories.payload(torrent_id))) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    NUVIO_EXPECT_TRUE(!std::filesystem::exists(directories.payload(torrent_id)));
+    nuvio_engine_destroy(engine);
+}

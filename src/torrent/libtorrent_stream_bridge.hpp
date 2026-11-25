@@ -11,6 +11,7 @@
 #include <libtorrent/fwd.hpp>
 
 #include "cache/verified_piece_cache.hpp"
+#include "storage/memory_piece_store.hpp"
 #include "torrent/protocol_backend.hpp"
 
 namespace nuvio::torrent {
@@ -40,7 +41,8 @@ public:
         std::uint16_t requested_port,
         std::uint64_t memory_capacity_bytes,
         std::uint64_t disk_capacity_bytes,
-        std::chrono::milliseconds inactivity_timeout
+        std::chrono::milliseconds inactivity_timeout,
+        std::shared_ptr<storage::MemoryPieceStore> memory_store = {}
     );
     ~LibtorrentStreamBridge();
 

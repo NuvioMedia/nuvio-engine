@@ -9,7 +9,7 @@ class JnaNativeLayoutTest {
     fun stableAbiStructuresMatch64BitCLayout() {
         assertEquals(8, Native.POINTER_SIZE)
         assertEquals(8, Native.SIZE_T_SIZE)
-        assertEquals(88, NativeConfig().size())
+        assertEquals(96, NativeConfig().size())
         assertEquals(40, NativeTorrentRequest().size())
         assertEquals(960, NativeEventStructure().size())
         assertEquals(32, NativeStreamRequest().size())
@@ -23,6 +23,8 @@ class JnaNativeLayoutTest {
         assertEquals(8, NativeConfig().offsetOf("dataDirectory"))
         assertEquals(40, NativeConfig().offsetOf("listenPort"))
         assertEquals(72, NativeConfig().offsetOf("tlsCaBundlePath"))
+        assertEquals(84, NativeConfig().offsetOf("storageMode"))
+        assertEquals(88, NativeConfig().offsetOf("memoryStorageCapacityBytes"))
         assertEquals(24, NativeTorrentRequest().offsetOf("torrentData"))
         assertEquals(368, NativeEventStructure().offsetOf("fileSize"))
         assertEquals(376, NativeEventStructure().offsetOf("streamId"))

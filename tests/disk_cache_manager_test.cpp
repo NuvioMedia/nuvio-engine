@@ -208,3 +208,16 @@ NUVIO_TEST("disk cache scan never follows a hash-shaped symlink") {
     NUVIO_EXPECT_TRUE(rejected);
     NUVIO_EXPECT_TRUE(std::filesystem::exists(outside / "valuable.bin"));
 }
+
+NUVIO_TEST("disk cache without a budget removes empty unprotected payload directories") {
+    DiskCacheFixture fixture;
+    std::filesystem::create_directories(fixture.root() / first_id);
+    std::filesystem::create_directories(fixture.root() / second_id);
+    nuvio::cache::DiskCacheManager cache(fixture.root(), 0);
+
+    const auto stats = cache.enforce({second_id});
+
+    NUVIO_EXPECT_TRUE(!std::filesystem::exists(fixture.root() / first_id));
+    NUVIO_EXPECT_TRUE(std::filesystem::exists(fixture.root() / second_id));
+    NUVIO_EXPECT_EQ(stats.used_bytes, std::uint64_t(0));
+}

@@ -54,6 +54,7 @@ constexpr std::uint64_t maximum_readahead_bytes = 256 * 1024 * 1024;
 constexpr std::uint64_t metadata_tail_bytes = 2 * 1024 * 1024;
 constexpr std::uint64_t block_bytes = 16 * 1024;
 constexpr std::uint64_t retained_behind_bytes = 64 * 1024 * 1024;
+constexpr std::uint64_t memory_retained_behind_bytes = 16 * 1024 * 1024;
 constexpr std::uint64_t retained_edge_bytes = 8 * 1024 * 1024;
 constexpr std::uint64_t retention_hysteresis_bytes = 32 * 1024 * 1024;
 constexpr std::uint64_t free_space_reserve_bytes = 512 * 1024 * 1024;
@@ -314,6 +315,7 @@ struct LibtorrentStreamBridge::Impl {
         std::vector<EvictedPiece> evicted;
         std::chrono::steady_clock::time_point next_save_request{};
         bool release_supported = true;
+        std::string memory_key;
     };
 
     struct DemandGuard {
@@ -345,7 +347,8 @@ struct LibtorrentStreamBridge::Impl {
         const std::uint16_t requested_port,
         const std::uint64_t memory_capacity_bytes,
         const std::uint64_t disk_capacity_bytes,
-        const std::chrono::milliseconds inactivity
+        const std::chrono::milliseconds inactivity,
+        std::shared_ptr<storage::MemoryPieceStore> memory_pieces
     )
         : window{
               critical_window_bytes,
@@ -355,6 +358,8 @@ struct LibtorrentStreamBridge::Impl {
               metadata_tail_bytes,
           },
           disk_capacity(disk_capacity_bytes),
+          memory_store(std::move(memory_pieces)),
+          retained_behind(memory_store ? memory_retained_behind_bytes : retained_behind_bytes),
           inactivity_timeout(inactivity),
           piece_cache(memory_capacity_bytes),
           server(std::make_unique<http::LoopbackServer>(
@@ -599,7 +604,7 @@ struct LibtorrentStreamBridge::Impl {
         };
         auto cursor = slice.begin;
         auto deadline = std::chrono::steady_clock::now() + piece_wait_timeout;
-        auto payload_readable = !payload.has_value() || payload->is_open();
+        auto payload_readable = !memory_store && (!payload.has_value() || payload->is_open());
         std::vector<char> buffer;
         while (cursor < slice.end) {
             std::shared_ptr<std::vector<char>> verified;
@@ -1141,12 +1146,25 @@ struct LibtorrentStreamBridge::Impl {
             } else {
                 std::vector<std::pair<lt::piece_index_t, lt::download_priority_t>> updates;
                 updates.reserve(previous->second.priorities.size() + combined.size());
+                std::unordered_set<std::uint32_t> partial;
+                if (memory_store && std::ranges::any_of(
+                        previous->second.priorities,
+                        [&combined](const auto& entry) { return !combined.contains(entry.first); }
+                    )) {
+                    std::vector<lt::partial_piece_info> queue;
+                    handle->get_download_queue(queue);
+                    for (const auto& entry : queue) {
+                        partial.insert(static_cast<std::uint32_t>(
+                            static_cast<int>(entry.piece_index)
+                        ));
+                    }
+                }
                 for (const auto& [piece, priority] : previous->second.priorities) {
                     static_cast<void>(priority);
                     if (!combined.contains(piece)) {
                         updates.emplace_back(
                             lt::piece_index_t(static_cast<int>(piece)),
-                            lt::dont_download
+                            partial.contains(piece) ? lt::low_priority : lt::dont_download
                         );
                     }
                 }
@@ -1559,6 +1577,7 @@ struct LibtorrentStreamBridge::Impl {
             state.save_path = std::filesystem::path(
                 route.handle.status(lt::torrent_handle::query_save_path).save_path
             );
+            state.memory_key = lt::aux::to_hex(route.handle.info_hashes().get_best());
             found = retention.emplace(route.torrent_id, std::move(state)).first;
         }
         return found->second;
@@ -1612,9 +1631,12 @@ struct LibtorrentStreamBridge::Impl {
     ) const {
         const auto minimum = saturating_sum(
             saturating_sum(window.playback_bytes, window.readahead_bytes),
-            saturating_sum(retained_behind_bytes, 2 * retained_edge_bytes)
+            saturating_sum(retained_behind, 2 * retained_edge_bytes)
         );
         auto budget = std::max(disk_capacity, minimum);
+        if (memory_store) {
+            return budget;
+        }
         std::error_code error;
         const auto space = std::filesystem::space(save_path, error);
         if (!error) {
@@ -1706,7 +1728,7 @@ struct LibtorrentStreamBridge::Impl {
                 route.file_size,
                 route.piece_size,
                 anchor->second.range.start,
-                retained_behind_bytes,
+                retained_behind,
                 saturating_sum(window.playback_bytes, window.readahead_bytes),
                 retained_edge_bytes,
                 target,
@@ -1718,7 +1740,7 @@ struct LibtorrentStreamBridge::Impl {
         if (evictions.empty()) {
             return;
         }
-        if (!range_release_available(state.save_path.parent_path())) {
+        if (!memory_store && !range_release_available(state.save_path.parent_path())) {
             state.release_supported = false;
             return;
         }
@@ -1726,9 +1748,12 @@ struct LibtorrentStreamBridge::Impl {
         indices.reserve(evictions.size());
         for (const auto piece : evictions) {
             indices.emplace_back(static_cast<int>(piece));
-            state.evicted.push_back({piece, now, false});
+            state.evicted.push_back({piece, now, memory_store != nullptr});
         }
         route.handle.nuvio_evict_pieces(indices);
+        if (memory_store) {
+            return;
+        }
         resume_save_requests.insert(route.torrent_id);
         state.next_save_request = now + resume_save_retry_interval;
     }
@@ -1803,6 +1828,10 @@ struct LibtorrentStreamBridge::Impl {
                 continue;
             }
             if (!state.release_supported) {
+                continue;
+            }
+            if (memory_store) {
+                memory_store->release(state.memory_key, evicted.piece);
                 continue;
             }
             for (const auto& slice : metadata->map_block(index, 0, metadata->piece_size(index))) {
@@ -1946,6 +1975,8 @@ struct LibtorrentStreamBridge::Impl {
 
     const scheduler::StreamWindow window;
     const std::uint64_t disk_capacity;
+    const std::shared_ptr<storage::MemoryPieceStore> memory_store;
+    const std::uint64_t retained_behind;
     const std::chrono::milliseconds inactivity_timeout;
     std::mutex routes_mutex;
     std::unordered_map<std::string, StreamRoute> routes;
@@ -1989,13 +2020,15 @@ LibtorrentStreamBridge::LibtorrentStreamBridge(
     const std::uint16_t requested_port,
     const std::uint64_t memory_capacity_bytes,
     const std::uint64_t disk_capacity_bytes,
-    const std::chrono::milliseconds inactivity_timeout
+    const std::chrono::milliseconds inactivity_timeout,
+    std::shared_ptr<storage::MemoryPieceStore> memory_store
 )
     : impl_(std::make_unique<Impl>(
           requested_port,
           memory_capacity_bytes,
           disk_capacity_bytes,
-          inactivity_timeout
+          inactivity_timeout,
+          std::move(memory_store)
       )) {
 }
 

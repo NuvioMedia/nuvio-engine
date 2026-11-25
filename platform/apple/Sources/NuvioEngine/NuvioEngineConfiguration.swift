@@ -12,12 +12,19 @@ public enum NuvioTorrentProfile: UInt32, Sendable, Equatable {
     case fast = 2
 }
 
+public enum NuvioStorageMode: UInt32, Sendable, Equatable {
+    case disk = 0
+    case memory = 1
+}
+
 public struct NuvioEngineConfiguration: Sendable, Equatable {
     public var dataDirectory: URL
     public var cacheDirectory: URL
     public var memoryCacheCapacityBytes: UInt64
     public var diskCacheCapacityBytes: UInt64
     public var torrentProfile: NuvioTorrentProfile
+    public var storageMode: NuvioStorageMode
+    public var memoryStorageCapacityBytes: UInt64
     public var listenPort: UInt16
     public var uploadMode: NuvioUploadMode
     public var streamInactivityTimeoutMilliseconds: UInt32
@@ -30,6 +37,8 @@ public struct NuvioEngineConfiguration: Sendable, Equatable {
         memoryCacheCapacityBytes: UInt64 = 64 * 1024 * 1024,
         diskCacheCapacityBytes: UInt64 = 2 * 1024 * 1024 * 1024,
         torrentProfile: NuvioTorrentProfile = .balanced,
+        storageMode: NuvioStorageMode = .disk,
+        memoryStorageCapacityBytes: UInt64 = 256 * 1024 * 1024,
         listenPort: UInt16 = 0,
         uploadMode: NuvioUploadMode = .unlimited,
         streamInactivityTimeoutMilliseconds: UInt32 = 30_000,
@@ -41,6 +50,8 @@ public struct NuvioEngineConfiguration: Sendable, Equatable {
         self.memoryCacheCapacityBytes = memoryCacheCapacityBytes
         self.diskCacheCapacityBytes = diskCacheCapacityBytes
         self.torrentProfile = torrentProfile
+        self.storageMode = storageMode
+        self.memoryStorageCapacityBytes = memoryStorageCapacityBytes
         self.listenPort = listenPort
         self.uploadMode = uploadMode
         self.streamInactivityTimeoutMilliseconds = streamInactivityTimeoutMilliseconds
@@ -55,6 +66,9 @@ extension NuvioEngineConfiguration {
         try validateDirectoryPath(cacheDirectory, name: "cache directory")
         if case let .limited(bytesPerSecond) = uploadMode, bytesPerSecond == 0 {
             throw NuvioEngineError(message: "limited upload mode requires a positive byte rate")
+        }
+        guard memoryStorageCapacityBytes > 0 else {
+            throw NuvioEngineError(message: "memory storage capacity must be positive")
         }
         if let tlsCABundle {
             guard tlsCABundle.isFileURL else {

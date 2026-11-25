@@ -2,6 +2,8 @@
 #include "torrent/libtorrent_stream_bridge.hpp"
 #include "cache/disk_cache_manager.hpp"
 #include "storage/atomic_file.hpp"
+#include "storage/memory_piece_store.hpp"
+#include "torrent/memory_disk_io.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -169,13 +171,17 @@ std::filesystem::path state_root(const ProtocolBackendConfig& config) {
 struct SessionBootstrap {
     lt::session_params params;
     std::string diagnostic;
+    std::shared_ptr<storage::MemoryPieceStore> memory_store{};
 };
 
 SessionBootstrap make_session_bootstrap(const ProtocolBackendConfig& config) {
     SessionBootstrap bootstrap{lt::session_params(make_settings(config)), {}};
-#if !defined(_WIN32)
-    bootstrap.params.disk_io_constructor = lt::posix_disk_io_constructor;
-#endif
+    if (config.storage_mode == NUVIO_ENGINE_STORAGE_MEMORY) {
+        bootstrap.memory_store = std::make_shared<storage::MemoryPieceStore>();
+        bootstrap.params.disk_io_constructor = memory_disk_io_constructor(bootstrap.memory_store);
+    } else {
+        bootstrap.params.disk_io_constructor = lt::posix_disk_io_constructor;
+    }
     try {
         const auto state = storage::read_bounded_file(
             state_root(config) / "session.dht",
@@ -294,6 +300,12 @@ public:
             : MetadataSource::cold;
         if (auto resume = load_resume_state(id); resume.has_value()) {
             params = std::move(*resume);
+            if (memory_store_) {
+                params.have_pieces.clear();
+                params.verified_pieces.clear();
+                params.unfinished_pieces.clear();
+                params.flags &= ~lt::torrent_flags::seed_mode;
+            }
             if (params.ti) {
                 metadata_source = MetadataSource::restored;
             } else if (provided_metadata) {
@@ -487,6 +499,32 @@ public:
             static_cast<void>(pop_events());
         }
         save_session_state();
+        trim_disk_cache_on_shutdown();
+    }
+
+    void trim_disk_cache_on_shutdown() {
+        for (const auto& [id, handle] : handles_) {
+            if (!handle.is_valid() || pending_removals_.contains(id) ||
+                pending_cache_removals_.contains(id)) {
+                continue;
+            }
+            pending_cache_removals_.insert(id);
+            try {
+                session_.remove_torrent(handle);
+            } catch (...) {
+                pending_cache_removals_.erase(id);
+            }
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while ((!pending_cache_removals_.empty() || !pending_removals_.empty()) &&
+               std::chrono::steady_clock::now() < deadline) {
+            session_.wait_for_alert(std::chrono::milliseconds(100));
+            static_cast<void>(pop_events());
+        }
+        try {
+            static_cast<void>(disk_cache_.enforce(protected_torrents()));
+        } catch (...) {
+        }
     }
 
     std::vector<BackendEvent> pop_events() override {
@@ -789,7 +827,11 @@ private:
               std::filesystem::path(config.download_directory) / "payload"
           ),
           warm_torrent_timeout_(config.warm_torrent_timeout_milliseconds),
-          disk_cache_(payload_directory_, config.disk_cache_capacity_bytes),
+          disk_cache_(
+              payload_directory_,
+              bootstrap.memory_store ? 0 : config.disk_cache_capacity_bytes
+          ),
+          memory_store_(bootstrap.memory_store),
           session_(std::move(bootstrap.params)) {
         if (!bootstrap.diagnostic.empty()) {
             queued_events_.push_back({
@@ -803,8 +845,9 @@ private:
         stream_bridge_ = std::make_unique<LibtorrentStreamBridge>(
             config.listen_port,
             config.memory_cache_capacity_bytes,
-            config.disk_cache_capacity_bytes,
-            std::chrono::milliseconds(config.stream_inactivity_timeout_milliseconds)
+            memory_store_ ? config.memory_storage_capacity_bytes : config.disk_cache_capacity_bytes,
+            std::chrono::milliseconds(config.stream_inactivity_timeout_milliseconds),
+            memory_store_
         );
     }
 
@@ -1816,6 +1859,7 @@ private:
     std::filesystem::path payload_directory_;
     const std::chrono::milliseconds warm_torrent_timeout_;
     cache::DiskCacheManager disk_cache_;
+    std::shared_ptr<storage::MemoryPieceStore> memory_store_;
     std::unordered_map<RequestContext*, std::unique_ptr<RequestContext>> pending_;
     std::unordered_map<std::string, std::unique_ptr<RequestContext>> active_;
     std::unordered_map<std::string, lt::torrent_handle> handles_;

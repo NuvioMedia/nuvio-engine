@@ -278,7 +278,7 @@ DiskCacheStats DiskCacheManager::enforce(
         return left.torrent_id < right.torrent_id;
     });
     for (const auto& candidate : candidates) {
-        if (used <= target_bytes) {
+        if (target_bytes > 0 && used <= target_bytes) {
             break;
         }
         std::error_code error;

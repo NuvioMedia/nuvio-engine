@@ -11,6 +11,8 @@ add_executable(
     ${PROJECT_SOURCE_DIR}/src/storage/atomic_file.cpp
     payload_reader_test.cpp
     ${PROJECT_SOURCE_DIR}/src/storage/payload_reader.cpp
+    memory_piece_store_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/storage/memory_piece_store.cpp
     range_release_test.cpp
     ${PROJECT_SOURCE_DIR}/src/storage/range_release.cpp
     verified_piece_cache_test.cpp

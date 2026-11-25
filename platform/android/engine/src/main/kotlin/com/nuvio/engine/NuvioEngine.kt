@@ -470,6 +470,8 @@ public class NuvioEngine private constructor(
                 memoryCacheCapacityBytes = config.memoryCacheCapacityBytes,
                 diskCacheCapacityBytes = config.diskCacheCapacityBytes,
                 torrentProfile = config.torrentProfile.nativeValue,
+                storageMode = config.storageMode.nativeValue,
+                memoryStorageCapacityBytes = config.memoryStorageCapacityBytes,
                 listenPort = config.listenPort,
                 uploadMode = config.uploadMode.nativeValue,
                 uploadLimitBytesPerSecond = config.uploadLimitBytesPerSecond,
