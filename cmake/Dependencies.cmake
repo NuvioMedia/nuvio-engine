@@ -76,6 +76,7 @@ function(nuvio_engine_add_libtorrent)
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-evict-pieces.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-piece-storage.patch"
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-piece-storage-eviction.patch"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/libtorrent-2.0.12-nuvio-windows-sparse.patch"
     )
     set(
         nuvio_libtorrent_patch_files
@@ -94,6 +95,7 @@ function(nuvio_engine_add_libtorrent)
         "src/torrent.cpp"
         "src/posix_disk_io.cpp"
         "src/torrent.cpp"
+        "src/posix_storage.cpp"
     )
     set(
         nuvio_libtorrent_patch_sentinels
@@ -112,6 +114,7 @@ function(nuvio_engine_add_libtorrent)
         "nuvio_evict_pieces"
         "nuvio_piece_disk_io_constructor"
         "Pieces left behind by a seek"
+        "nuvio_set_sparse"
     )
     list(LENGTH nuvio_libtorrent_patches nuvio_libtorrent_patch_count)
     math(EXPR nuvio_libtorrent_last_patch "${nuvio_libtorrent_patch_count} - 1")

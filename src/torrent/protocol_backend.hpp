@@ -24,6 +24,8 @@ struct ProtocolBackendConfig {
     std::uint32_t warm_torrent_timeout_milliseconds;
     nuvio_engine_torrent_profile torrent_profile;
     std::string tls_ca_bundle_path;
+    nuvio_engine_storage_mode storage_mode = NUVIO_ENGINE_STORAGE_DISK;
+    std::uint64_t memory_storage_capacity_bytes = 0;
 };
 
 enum class TorrentInputType {

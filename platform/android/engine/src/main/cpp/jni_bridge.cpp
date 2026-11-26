@@ -124,6 +124,8 @@ Java_com_nuvio_engine_internal_NativeBridge_nativeCreate(
     const jlong memory_cache_capacity,
     const jlong disk_cache_capacity,
     const jint torrent_profile,
+    const jint storage_mode,
+    const jlong memory_storage_capacity,
     const jint listen_port,
     const jint upload_mode,
     const jlong upload_limit,
@@ -147,6 +149,8 @@ Java_com_nuvio_engine_internal_NativeBridge_nativeCreate(
     config.memory_cache_capacity_bytes = static_cast<std::uint64_t>(memory_cache_capacity);
     config.disk_cache_capacity_bytes = static_cast<std::uint64_t>(disk_cache_capacity);
     config.torrent_profile = static_cast<nuvio_engine_torrent_profile>(torrent_profile);
+    config.storage_mode = static_cast<nuvio_engine_storage_mode>(storage_mode);
+    config.memory_storage_capacity_bytes = static_cast<std::uint64_t>(memory_storage_capacity);
     config.listen_port = static_cast<std::uint16_t>(listen_port);
     config.upload_mode = static_cast<nuvio_engine_upload_mode>(upload_mode);
     config.upload_limit_bytes_per_second = static_cast<std::uint64_t>(upload_limit);

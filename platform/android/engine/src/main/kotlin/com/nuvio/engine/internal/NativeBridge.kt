@@ -11,6 +11,8 @@ internal object NativeBridge {
         memoryCacheCapacityBytes: Long,
         diskCacheCapacityBytes: Long,
         torrentProfile: Int,
+        storageMode: Int,
+        memoryStorageCapacityBytes: Long,
         listenPort: Int,
         uploadMode: Int,
         uploadLimitBytesPerSecond: Long,

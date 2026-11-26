@@ -14,12 +14,19 @@ public enum class NuvioTorrentProfile(internal val nativeValue: Int) {
     Fast(2),
 }
 
+public enum class NuvioStorageMode(internal val nativeValue: Int) {
+    Disk(0),
+    Memory(1),
+}
+
 public data class NuvioEngineConfig(
     val dataDirectory: File,
     val cacheDirectory: File,
     val memoryCacheCapacityBytes: Long = 64L * 1024L * 1024L,
     val diskCacheCapacityBytes: Long = 2L * 1024L * 1024L * 1024L,
     val torrentProfile: NuvioTorrentProfile = NuvioTorrentProfile.Balanced,
+    val storageMode: NuvioStorageMode = NuvioStorageMode.Disk,
+    val memoryStorageCapacityBytes: Long = 256L * 1024L * 1024L,
     val listenPort: Int = 0,
     val uploadMode: NuvioUploadMode = NuvioUploadMode.Unlimited,
     val uploadLimitBytesPerSecond: Long = 0L,
@@ -32,6 +39,7 @@ public data class NuvioEngineConfig(
         validateNativePath(cacheDirectory, "cache directory")
         require(memoryCacheCapacityBytes >= 0) { "memory cache capacity must be non-negative" }
         require(diskCacheCapacityBytes >= 0) { "disk cache capacity must be non-negative" }
+        require(memoryStorageCapacityBytes > 0) { "memory storage capacity must be positive" }
         require(listenPort in 0..65_535) { "listen port must be between 0 and 65535" }
         require(streamInactivityTimeoutMilliseconds >= 0) {
             "stream inactivity timeout must be non-negative"

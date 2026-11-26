@@ -41,6 +41,8 @@ internal class JnaNuvioNativeApi(
             warmTorrentTimeoutMilliseconds = config.warmTorrentTimeoutMilliseconds
             tlsCaBundlePath = tlsCaBundle
             torrentProfile = config.torrentProfile.nativeValue
+            storageMode = config.storageMode.nativeValue
+            memoryStorageCapacityBytes = config.memoryStorageCapacityBytes
             write()
         }
         val output = PointerByReference()

@@ -43,6 +43,12 @@ enum nuvio_engine_torrent_profile_value {
     NUVIO_ENGINE_TORRENT_PROFILE_FAST = 2
 };
 
+typedef uint32_t nuvio_engine_storage_mode;
+enum nuvio_engine_storage_mode_value {
+    NUVIO_ENGINE_STORAGE_DISK = 0,
+    NUVIO_ENGINE_STORAGE_MEMORY = 1
+};
+
 typedef struct nuvio_engine_config {
     uint32_t struct_size;
     const char* data_directory;
@@ -59,7 +65,8 @@ typedef struct nuvio_engine_config {
     uint32_t reserved_2;
     const char* tls_ca_bundle_path;
     nuvio_engine_torrent_profile torrent_profile;
-    uint32_t reserved_3;
+    nuvio_engine_storage_mode storage_mode;
+    uint64_t memory_storage_capacity_bytes;
 } nuvio_engine_config;
 
 typedef uint32_t nuvio_engine_event_type;

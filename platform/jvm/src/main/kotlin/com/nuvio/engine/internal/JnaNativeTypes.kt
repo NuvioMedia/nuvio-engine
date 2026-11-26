@@ -26,7 +26,8 @@ internal abstract class NativeStructure : Structure() {
     "reserved2",
     "tlsCaBundlePath",
     "torrentProfile",
-    "reserved3",
+    "storageMode",
+    "memoryStorageCapacityBytes",
 )
 internal class NativeConfig : NativeStructure() {
     @JvmField var structSize: Int = 0
@@ -44,7 +45,8 @@ internal class NativeConfig : NativeStructure() {
     @JvmField var reserved2: Int = 0
     @JvmField var tlsCaBundlePath: Pointer? = null
     @JvmField var torrentProfile: Int = 0
-    @JvmField var reserved3: Int = 0
+    @JvmField var storageMode: Int = 0
+    @JvmField var memoryStorageCapacityBytes: Long = 0
 }
 
 @Structure.FieldOrder(

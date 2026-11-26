@@ -22,6 +22,8 @@ class NuvioEngineConfigTest {
         val configuration = config()
         configuration.validate()
         assertEquals(NuvioTorrentProfile.Balanced, configuration.torrentProfile)
+        assertEquals(NuvioStorageMode.Disk, configuration.storageMode)
+        assertEquals(256L * 1024L * 1024L, configuration.memoryStorageCapacityBytes)
     }
 
     @Test
@@ -47,6 +49,9 @@ class NuvioEngineConfigTest {
         }
         assertFailsWith<IllegalArgumentException> {
             config().copy(diskCacheCapacityBytes = -1).validate()
+        }
+        assertFailsWith<IllegalArgumentException> {
+            config().copy(memoryStorageCapacityBytes = 0).validate()
         }
         assertFailsWith<IllegalArgumentException> {
             config().copy(listenPort = 65_536).validate()

@@ -10,6 +10,8 @@ final class NuvioEngineTests: XCTestCase {
             cacheDirectory: root.appendingPathComponent("cache")
         )
         XCTAssertEqual(configuration.torrentProfile, .balanced)
+        XCTAssertEqual(configuration.storageMode, .disk)
+        XCTAssertEqual(configuration.memoryStorageCapacityBytes, 256 * 1024 * 1024)
     }
 
     func testConfigurationRejectsInvalidUploadLimit() throws {
