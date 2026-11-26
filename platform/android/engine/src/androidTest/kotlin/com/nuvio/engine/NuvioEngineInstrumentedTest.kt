@@ -32,7 +32,7 @@ class NuvioEngineInstrumentedTest {
             ),
         )
         try {
-            assertEquals("0.1.6", NuvioEngine.version)
+            assertEquals("0.1.7", NuvioEngine.version)
             assertTrue(NuvioEngine.protocolBackendVersion.startsWith("2.0.12"))
             val trustBundle = File(dataDirectory, "tls/android-ca.pem")
             assertTrue(trustBundle.isFile)
