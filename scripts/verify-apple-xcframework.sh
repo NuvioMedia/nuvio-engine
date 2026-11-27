@@ -92,12 +92,12 @@ assert_architectures "$simulator/libCNuvioEngine.a" arm64 x86_64
 temporary_directory=$(mktemp -d)
 trap 'rm -rf "$temporary_directory"' EXIT
 assert_build_version "$macos/libCNuvioEngine.a" arm64 MACOS 11.0 macos-arm64
-assert_build_version "$ios/libCNuvioEngine.a" arm64 IOS 16.1 ios-arm64
+assert_build_version "$ios/libCNuvioEngine.a" arm64 IOS 15.0 ios-arm64
 assert_build_version \
     "$simulator/libCNuvioEngine.a" \
     arm64 \
     IOSSIMULATOR \
-    16.1 \
+    15.0 \
     ios-simulator-arm64
 
 api_symbols=(
